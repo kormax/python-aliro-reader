@@ -1,0 +1,19 @@
+{
+    "logging": {
+        "level": 20
+    },
+
+    "nfc": {
+        "path": "tty"
+    },
+
+    "aliro": {
+        "persist": "persist.json",
+        "express": true,
+        "flow": "fast",
+
+        "reader_private_key": "0000000000000000000000000000000000000000000000000000000000000001",
+        "reader_group_identifier": "00000000000000000000000000000000",
+        "reader_instance_identifier": "00000000000000000000000000000000"
+    }
+}
