@@ -246,12 +246,13 @@ def fast_auth(  # noqa: C901
     authentication_policy: AuthenticationPolicy,
     reader_group_identifier: bytes,
     reader_group_sub_identifier: bytes,
+    auth0_command_vendor_extension: bytes | None,
     reader_public_key: ec.EllipticCurvePublicKey,
     reader_ephemeral_public_key: ec.EllipticCurvePublicKey,
     transaction_identifier: bytes,
     endpoints: List[Endpoint],
     key_size=16,
-) -> Tuple[ec.EllipticCurvePublicKey, Endpoint | None, AliroSecureContext | None]:
+) -> Tuple[ec.EllipticCurvePublicKey, Endpoint | None, AliroSecureContext | None, bytes]:
     (
         reader_ephemeral_public_key_x,
         reader_ephemeral_public_key_y,
@@ -259,6 +260,13 @@ def fast_auth(  # noqa: C901
     reader_ephemeral_public_key_bytes = bytes([0x04, *reader_ephemeral_public_key_x, *reader_ephemeral_public_key_y])
     reader_public_key_x, _ = get_ec_key_public_points(reader_public_key)
     fci_proprietary_bytes = to_bytes(fci_proprietary_template)
+    auth0_command_vendor_extension_tlv = None
+    if auth0_command_vendor_extension is not None:
+        if len(auth0_command_vendor_extension) > 127:
+            raise ValueError(
+                f"auth0_command_vendor_extension cannot exceed 127 bytes (got {len(auth0_command_vendor_extension)})"
+            )
+        auth0_command_vendor_extension_tlv = BerTLV(0xB1, value=auth0_command_vendor_extension)
 
     command_data = BerTLVMessage(
         [
@@ -268,6 +276,7 @@ def fast_auth(  # noqa: C901
             BerTLV(0x87, value=reader_ephemeral_public_key_bytes),
             BerTLV(0x4C, value=transaction_identifier),
             BerTLV(0x4D, value=reader_group_identifier + reader_group_sub_identifier),
+            auth0_command_vendor_extension_tlv,
         ]
     )
 
@@ -310,6 +319,17 @@ def fast_auth(  # noqa: C901
 
     fast_requested = (command_parameters & int(AliroTransactionFlags.FAST)) != 0
     returned_cryptogram = message.find_by_tag_else_empty(0x9D).value
+    auth0_response_vendor_extension_tlv = message.find_by_tag_else(0xB2, None)
+    if auth0_response_vendor_extension_tlv is not None and len(auth0_response_vendor_extension_tlv.value) > 127:
+        raise ProtocolError(
+            "Response contains invalid auth0_response_vendor_extension_tag 0xB2"
+            f" length={len(auth0_response_vendor_extension_tlv.value)}"
+        )
+    auth0_info_suffix = b""
+    if auth0_command_vendor_extension_tlv is not None:
+        auth0_info_suffix += auth0_command_vendor_extension_tlv.to_bytes()
+    if auth0_response_vendor_extension_tlv is not None:
+        auth0_info_suffix += auth0_response_vendor_extension_tlv.to_bytes()
     if returned_cryptogram is not None and len(returned_cryptogram) != 64:
         raise ProtocolError(f"Response contains invalid cryptogram_tag 0x9D length={len(returned_cryptogram)}")
     if not fast_requested and returned_cryptogram is not None:
@@ -318,7 +338,7 @@ def fast_auth(  # noqa: C901
         raise ProtocolError("AUTH0 response does not contain cryptogram while expedited-fast was requested")
     if returned_cryptogram is None:
         logging.info("AUTH0 skipped")
-        return endpoint_ephemeral_public_key, None, None
+        return endpoint_ephemeral_public_key, None, None, auth0_info_suffix
 
     endpoint = None
     matched_endpoint = None
@@ -350,7 +370,7 @@ def fast_auth(  # noqa: C901
             endpoint_public_key_x,
         ]
 
-        okm = hkdf_sha256(k_persistent, salt, endpoint_ephemeral_public_key_x, 0xA0)
+        okm = hkdf_sha256(k_persistent, salt, endpoint_ephemeral_public_key_x + auth0_info_suffix, 0xA0)
         cryptogram_sk = okm[0x00:0x20]
 
         try:
@@ -424,7 +444,7 @@ def fast_auth(  # noqa: C901
         matched_endpoint = endpoint
         matched_secure = secure
         break
-    return endpoint_ephemeral_public_key, matched_endpoint, matched_secure
+    return endpoint_ephemeral_public_key, matched_endpoint, matched_secure, auth0_info_suffix
 
 
 def load_cert(tag: ISO7816Tag, reader_cert: bytes):
@@ -475,6 +495,7 @@ def standard_auth(  # noqa: C901
     transaction_identifier: bytes,
     endpoint_ephemeral_public_key: ec.EllipticCurvePublicKey,
     endpoints: List[Endpoint],
+    auth0_info_suffix: bytes = b"",
     reader_certificate: bytes | None = None,
     key_size=16,
 ) -> Tuple[bytes | None, Endpoint | None, AliroSecureContext | None]:
@@ -569,7 +590,7 @@ def standard_auth(  # noqa: C901
             fci_proprietary_template,
         ]
     )
-    info = to_bytes([endpoint_ephemeral_public_key_x])
+    info = to_bytes([endpoint_ephemeral_public_key_x, auth0_info_suffix])
     material = hkdf_sha256(
         derived_key,
         salt,
@@ -940,6 +961,7 @@ def perform_authentication_flow(
     flow: AliroFlow,
     reader_group_identifier: bytes,
     reader_group_sub_identifier: bytes,
+    auth0_command_vendor_extension: bytes | None,
     reader_private_key: ec.EllipticCurvePrivateKey,
     reader_ephemeral_private_key: ec.EllipticCurvePrivateKey,
     protocol_version: bytes,
@@ -956,7 +978,7 @@ def perform_authentication_flow(
     reader_public_key = reader_private_key.public_key()
 
     reader_ephemeral_public_key = reader_ephemeral_private_key.public_key()
-    endpoint_ephemeral_public_key, endpoint, secure = fast_auth(
+    endpoint_ephemeral_public_key, endpoint, secure, auth0_info_suffix = fast_auth(
         tag=tag,
         fci_proprietary_template=fci_proprietary_template,
         protocol_version=protocol_version,
@@ -965,6 +987,7 @@ def perform_authentication_flow(
         authentication_policy=authentication_policy,
         reader_group_identifier=reader_group_identifier,
         reader_group_sub_identifier=reader_group_sub_identifier,
+        auth0_command_vendor_extension=auth0_command_vendor_extension,
         reader_public_key=reader_public_key,
         reader_ephemeral_public_key=reader_ephemeral_public_key,
         transaction_identifier=transaction_identifier,
@@ -994,6 +1017,7 @@ def perform_authentication_flow(
         reader_ephemeral_private_key=reader_ephemeral_private_key,
         endpoints=endpoints,
         endpoint_ephemeral_public_key=endpoint_ephemeral_public_key,
+        auth0_info_suffix=auth0_info_suffix,
         reader_certificate=reader_certificate,
         key_size=key_size,
     )
@@ -1039,6 +1063,7 @@ def read_aliro(
     tag: ISO7816Tag,
     reader_group_identifier: bytes,
     reader_group_sub_identifier: bytes,
+    auth0_command_vendor_extension: bytes | None,
     reader_private_key: bytes,
     endpoints: List[Endpoint],
     preferred_versions: Collection[bytes] = None,
@@ -1089,6 +1114,7 @@ def read_aliro(
         flow=flow,
         reader_group_identifier=reader_group_identifier,
         reader_group_sub_identifier=reader_group_sub_identifier,
+        auth0_command_vendor_extension=auth0_command_vendor_extension,
         reader_private_key=reader_private_key,
         reader_ephemeral_private_key=generate_ec_key_if_provided_is_none(reader_ephemeral_private_key),
         protocol_version=protocol_version,

@@ -69,6 +69,21 @@ def resolve_reader_certificate(
     raise ValueError("aliro.reader_certificate must be true, false/null, hex string, or base64 string")
 
 
+def resolve_auth0_command_vendor_extension(value) -> bytes | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            resolved = hex_or_base64_to_bytes(value)
+        except ValueError as exc:
+            raise ValueError(
+                "aliro.auth0_command_vendor_extension must be hex or base64 when provided as string"
+            ) from exc
+        logging.info(f"Loaded auth0_command_vendor_extension from configuration ({len(resolved)} bytes)")
+        return resolved
+    raise ValueError("aliro.auth0_command_vendor_extension must be null, hex string, or base64 string")
+
+
 def configure_logging(config: dict):
     formatter = logging.Formatter("[%(asctime)s] [%(levelname)8s] %(module)-18s:%(lineno)-4d %(message)s")
     hdlr = logging.StreamHandler(sys.stdout)
@@ -122,6 +137,7 @@ def read_aliro_once(  # noqa: C901
     flow: AliroFlow,
     authentication_policy: AuthenticationPolicy,
     reader_certificate: bytes | None,
+    auth0_command_vendor_extension: bytes | None,
     throttle_polling: float,
     should_run,
 ):
@@ -167,6 +183,7 @@ def read_aliro_once(  # noqa: C901
             flow=flow,
             authentication_policy=authentication_policy,
             reader_certificate=reader_certificate,
+            auth0_command_vendor_extension=auth0_command_vendor_extension,
             reader_group_identifier=repository.get_reader_group_identifier(),
             reader_group_sub_identifier=repository.get_reader_group_sub_identifier(),
             reader_private_key=repository.get_reader_private_key(),
@@ -200,6 +217,7 @@ def run_aliro(
     flow: AliroFlow,
     authentication_policy: AuthenticationPolicy,
     reader_certificate: bytes | None,
+    auth0_command_vendor_extension: bytes | None,
     throttle_polling: float,
     should_run,
 ):
@@ -220,6 +238,7 @@ def run_aliro(
             flow=flow,
             authentication_policy=authentication_policy,
             reader_certificate=reader_certificate,
+            auth0_command_vendor_extension=auth0_command_vendor_extension,
             throttle_polling=throttle_polling,
             should_run=should_run,
         )
@@ -246,6 +265,9 @@ def main():
     )
     if replacement_reader_private_key is not None:
         repository.set_reader_private_key(replacement_reader_private_key)
+    auth0_command_vendor_extension = resolve_auth0_command_vendor_extension(
+        config["aliro"].get("auth0_command_vendor_extension")
+    )
     throttle_polling = float(config["nfc"].get("throttle_polling") or 0.15)
 
     running = True
@@ -269,6 +291,7 @@ def main():
             flow=flow,
             authentication_policy=authentication_policy,
             reader_certificate=reader_certificate,
+            auth0_command_vendor_extension=auth0_command_vendor_extension,
             throttle_polling=throttle_polling,
             should_run=should_run,
         )
