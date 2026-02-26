@@ -255,14 +255,8 @@ class ProtocolError(Exception):
     pass
 
 
-def _reader_instance_identifier_value(reader_group_identifier: bytes, reader_instance_identifier: bytes) -> bytes:
-    if len(reader_instance_identifier) == 32:
-        return reader_instance_identifier
-    return reader_group_identifier + reader_instance_identifier
-
-
-def find_endpoint_by_identifier(endpoints: List[Endpoint], identifier):
-    return next((e for e in endpoints if e.identifier == identifier), None)
+def find_endpoint_by_key_slot(endpoints: List[Endpoint], key_slot):
+    return next((e for e in endpoints if e.key_slot == key_slot), None)
 
 
 def generate_ec_key_if_provided_is_none(
@@ -283,7 +277,7 @@ def fast_auth(
     transaction_flags: int,
     transaction_code: AliroTransactionType,
     reader_group_identifier: bytes,
-    reader_instance_identifier: bytes,
+    reader_group_sub_identifier: bytes,
     reader_public_key: ec.EllipticCurvePublicKey,
     reader_ephemeral_public_key: ec.EllipticCurvePublicKey,
     transaction_identifier: bytes,
@@ -296,9 +290,6 @@ def fast_auth(
     ) = get_ec_key_public_points(reader_ephemeral_public_key)
     reader_ephemeral_public_key_bytes = bytes([0x04, *reader_ephemeral_public_key_x, *reader_ephemeral_public_key_y])
     reader_public_key_x, _ = get_ec_key_public_points(reader_public_key)
-    reader_instance_identifier_value = _reader_instance_identifier_value(
-        reader_group_identifier, reader_instance_identifier
-    )
     fci_proprietary_bytes = to_bytes(fci_proprietary_template)
 
     command_data = BerTLVMessage(
@@ -308,7 +299,7 @@ def fast_auth(
             BerTLV(0x5C, value=protocol_version),
             BerTLV(0x87, value=reader_ephemeral_public_key_bytes),
             BerTLV(0x4C, value=transaction_identifier),
-            BerTLV(0x4D, value=reader_group_identifier + reader_instance_identifier),
+            BerTLV(0x4D, value=reader_group_identifier + reader_group_sub_identifier),
         ]
     )
 
@@ -352,7 +343,7 @@ def fast_auth(
         salt = [
             reader_public_key_x,
             VOLATILE_FAST,
-            reader_instance_identifier_value,
+            reader_group_identifier + reader_group_sub_identifier,
             transport_type,
             BerTLV(0x5C, value=protocol_version),
             reader_ephemeral_public_key_x,
@@ -376,16 +367,17 @@ def fast_auth(
         except Exception as exc:
             logging.info(f"AUTH0 fast plaintext TLV parse failed: {exc}")
             continue
-        auth_status = message.find_by_tag_else(0x5E, None)
-        issued_at = message.find_by_tag_else(0x91, None)
-        expires_at = message.find_by_tag_else(0x92, None)
-        auth_status_value = auth_status.value if auth_status else None
-        issued_at = issued_at.value if issued_at else None
-        expires_at = expires_at.value if expires_at else None
-        if auth_status_value is None or issued_at is None or expires_at is None:
-            logging.info("AUTH0 fast cryptogram plaintext missing auth_status/issued/expires")
+        auth_status_value = message.find_by_tag_else_empty(0x5E).value
+        credential_signed_timestamp = message.find_by_tag_else_empty(0x91).value
+        revocation_signed_timestamp = message.find_by_tag_else_empty(0x92).value
+        if auth_status_value is None or credential_signed_timestamp is None or revocation_signed_timestamp is None:
+            logging.info("AUTH0 fast cryptogram plaintext missing signaling/timestamps")
             continue
-        if len(auth_status_value) != 2 or len(issued_at) != 0x14 or len(expires_at) != 0x14:
+        if (
+            len(auth_status_value) != 2
+            or len(credential_signed_timestamp) != 0x14
+            or len(revocation_signed_timestamp) != 0x14
+        ):
             logging.info("AUTH0 fast cryptogram plaintext length mismatch")
             continue
         signaling_bitmask = SignalingBitmask.parse(auth_status_value)
@@ -393,8 +385,8 @@ def fast_auth(
         logging.info(
             "AUTH0 fast cryptogram verified"
             f" signaling_bitmask={signaling_bitmask!r}"
-            f" issued_at={issued_at}"
-            f" expires_at={expires_at}"
+            f" credential_signed_timestamp={credential_signed_timestamp}"
+            f" revocation_signed_timestamp={revocation_signed_timestamp}"
         )
 
         exchange_sk_reader = okm[0x20:0x40]
@@ -429,8 +421,8 @@ def fast_auth(
         )
         logging.info(f"AUTH0 fast cryptogram verified for Endpoint({endpoint.id.hex()})")
         logging.info(f"Derived secure context: {secure!r}")
-        endpoint.issued_at = issued_at
-        endpoint.expires_at = expires_at
+        endpoint.credential_signed_timestamp = credential_signed_timestamp
+        endpoint.revocation_signed_timestamp = revocation_signed_timestamp
         endpoint.last_signaling_bitmask = signaling_bitmask
         matched_endpoint = endpoint
         matched_secure = secure
@@ -446,7 +438,7 @@ def standard_auth(  # noqa: C901
     transaction_flags: int,
     transaction_code: AliroTransactionType,
     reader_group_identifier: bytes,
-    reader_instance_identifier: bytes,
+    reader_group_sub_identifier: bytes,
     reader_ephemeral_private_key: ec.EllipticCurvePrivateKey,
     reader_private_key: ec.EllipticCurvePrivateKey,
     transaction_identifier: bytes,
@@ -460,7 +452,7 @@ def standard_auth(  # noqa: C901
     reader_ephemeral_public_key_x, _ = get_ec_key_public_points(reader_ephemeral_public_key)
 
     authentication_hash_input_material = [
-        BerTLV(0x4D, value=reader_group_identifier + reader_instance_identifier),
+        BerTLV(0x4D, value=reader_group_identifier + reader_group_sub_identifier),
         BerTLV(0x86, value=endpoint_ephemeral_public_key_x),
         BerTLV(0x87, value=reader_ephemeral_public_key_x),
         BerTLV(0x4C, value=transaction_identifier),
@@ -495,9 +487,6 @@ def standard_auth(  # noqa: C901
     endpoint_ephemeral_public_key_x, _ = get_ec_key_public_points(endpoint_ephemeral_public_key)
     reader_ephemeral_public_key_x, _ = get_ec_key_public_points(reader_ephemeral_public_key)
     reader_public_key_x, _ = get_ec_key_public_points(reader_private_key.public_key())
-    reader_instance_identifier_value = _reader_instance_identifier_value(
-        reader_group_identifier, reader_instance_identifier
-    )
     fci_proprietary_bytes = to_bytes(fci_proprietary_template)
 
     shared_key = reader_ephemeral_private_key.exchange(ec.ECDH(), endpoint_ephemeral_public_key)
@@ -512,7 +501,7 @@ def standard_auth(  # noqa: C901
         [
             reader_public_key_x,
             VOLATILE_ASTR,
-            reader_group_identifier + reader_instance_identifier,
+            reader_group_identifier + reader_group_sub_identifier,
             transport_type,
             BerTLV(0x5C, value=protocol_version),
             reader_ephemeral_public_key_x,
@@ -591,8 +580,8 @@ def standard_auth(  # noqa: C901
     if signature is None:
         raise ProtocolError("No device signature in response at tag 0x9E")
 
-    issued_at = tlv_array.find_by_tag_else_empty(0x91).value
-    expires_at = tlv_array.find_by_tag_else_empty(0x92).value
+    credential_signed_timestamp = tlv_array.find_by_tag_else_empty(0x91).value
+    revocation_signed_timestamp = tlv_array.find_by_tag_else_empty(0x92).value
     auth_status = tlv_array.find_by_tag_else_empty(0x5E).value
     signaling_bitmask = SignalingBitmask.parse(auth_status)
 
@@ -603,9 +592,9 @@ def standard_auth(  # noqa: C901
     if device_public_key is not None:
         endpoint_public_key = load_ec_public_key_from_bytes(device_public_key)
 
-    endpoint_identifier = tlv_array.find_by_tag_else_empty(0x4E).value
-    if endpoint_identifier is not None:
-        endpoint = find_endpoint_by_identifier(endpoints, endpoint_identifier)
+    key_slot = tlv_array.find_by_tag_else_empty(0x4E).value
+    if key_slot is not None:
+        endpoint = find_endpoint_by_key_slot(endpoints, key_slot)
         if endpoint is not None:
             endpoint_public_key = load_ec_public_key_from_bytes(endpoint.public_key)
 
@@ -613,9 +602,9 @@ def standard_auth(  # noqa: C901
         "AUTH1 response"
         f" signaling={auth_status.hex() if auth_status else None}"
         f" signaling_bitmask={signaling_bitmask!r}"
-        f" issued_at={issued_at},"
-        f" expires_at={expires_at},"
-        f" endpoint_identifier={endpoint_identifier.hex() if endpoint_identifier else None}"
+        f" credential_signed_timestamp={credential_signed_timestamp},"
+        f" revocation_signed_timestamp={revocation_signed_timestamp},"
+        f" key_slot={key_slot.hex() if key_slot else None}"
     )
 
     if endpoint_public_key is None:
@@ -624,7 +613,7 @@ def standard_auth(  # noqa: C901
     signature = encode_dss_signature(int.from_bytes(signature[:32], "big"), int.from_bytes(signature[32:], "big"))
 
     verification_hash_input_material = [
-        BerTLV(0x4D, value=reader_group_identifier + reader_instance_identifier),
+        BerTLV(0x4D, value=reader_group_identifier + reader_group_sub_identifier),
         BerTLV(0x86, value=endpoint_ephemeral_public_key_x),
         BerTLV(0x87, value=reader_ephemeral_public_key_x),
         BerTLV(0x4C, value=transaction_identifier),
@@ -644,7 +633,7 @@ def standard_auth(  # noqa: C901
     persistent_salt = [
         reader_public_key_x,
         PERSISTENT_ASTR,
-        reader_instance_identifier_value,
+        reader_group_identifier + reader_group_sub_identifier,
         transport_type,
         BerTLV(0x5C, value=protocol_version),
         reader_ephemeral_public_key_x,
@@ -667,13 +656,15 @@ def standard_auth(  # noqa: C901
             key_type=KeyType.SECP256R1,
             public_key=device_public_key,
             persistent_key=k_persistent,
-            identifier=endpoint_identifier,
-            issued_at=issued_at,
+            key_slot=key_slot,
+            credential_signed_timestamp=credential_signed_timestamp,
+            revocation_signed_timestamp=revocation_signed_timestamp,
             last_signaling_bitmask=signaling_bitmask,
         )
     else:
         endpoint.persistent_key = k_persistent
-        endpoint.issued_at = issued_at
+        endpoint.credential_signed_timestamp = credential_signed_timestamp
+        endpoint.revocation_signed_timestamp = revocation_signed_timestamp
         endpoint.last_signaling_bitmask = signaling_bitmask
     return k_persistent, endpoint, secure
 
@@ -813,7 +804,7 @@ def perform_authentication_flow(
     tag: ISO7816Tag,
     flow: AliroFlow,
     reader_group_identifier: bytes,
-    reader_instance_identifier: bytes,
+    reader_group_sub_identifier: bytes,
     reader_private_key: ec.EllipticCurvePrivateKey,
     reader_ephemeral_private_key: ec.EllipticCurvePrivateKey,
     protocol_version: bytes,
@@ -839,7 +830,7 @@ def perform_authentication_flow(
         transaction_flags=transaction_flags,
         transaction_code=transaction_code,
         reader_group_identifier=reader_group_identifier,
-        reader_instance_identifier=reader_instance_identifier,
+        reader_group_sub_identifier=reader_group_sub_identifier,
         reader_public_key=reader_public_key,
         reader_ephemeral_public_key=reader_ephemeral_public_key,
         transaction_identifier=transaction_identifier,
@@ -868,7 +859,7 @@ def perform_authentication_flow(
         transaction_code=transaction_code,
         transaction_identifier=transaction_identifier,
         reader_group_identifier=reader_group_identifier,
-        reader_instance_identifier=reader_instance_identifier,
+        reader_group_sub_identifier=reader_group_sub_identifier,
         reader_private_key=reader_private_key,
         reader_ephemeral_private_key=reader_ephemeral_private_key,
         endpoints=endpoints,
@@ -900,7 +891,7 @@ def perform_authentication_flow(
 def read_aliro(
     tag: ISO7816Tag,
     reader_group_identifier: bytes,
-    reader_instance_identifier: bytes,
+    reader_group_sub_identifier: bytes,
     reader_private_key: bytes,
     endpoints: List[Endpoint],
     preferred_versions: Collection[bytes] = None,
@@ -950,7 +941,7 @@ def read_aliro(
         tag=tag,
         flow=flow,
         reader_group_identifier=reader_group_identifier,
-        reader_instance_identifier=reader_instance_identifier,
+        reader_group_sub_identifier=reader_group_sub_identifier,
         reader_private_key=reader_private_key,
         reader_ephemeral_private_key=generate_ec_key_if_provided_is_none(reader_ephemeral_private_key),
         protocol_version=protocol_version,

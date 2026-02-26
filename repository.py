@@ -17,7 +17,7 @@ class Repository:
     def __init__(self, storage_file_path):
         self.storage_file_path = storage_file_path
         self._reader_private_key = bytes.fromhex("00" * 32)
-        self._reader_identifier = bytes.fromhex("00" * 8)
+        self._reader_group_sub_identifier = bytes.fromhex("00" * 8)
         self._reader_group_identifier = bytes.fromhex("00" * 8)
         self._endpoints = []
         self._transaction_lock = Lock()
@@ -28,7 +28,11 @@ class Repository:
         try:
             with self._state_lock:
                 configuration = json.load(open(self.storage_file_path, "r+"))
-                self._reader_identifier = bytes.fromhex(configuration.get("reader_identifier", "00" * 16))
+                self._reader_group_sub_identifier = bytes.fromhex(
+                    configuration.get("reader_group_sub_identifier")
+                    or configuration.get("reader_identifier")
+                    or ("00" * 16)
+                )
                 self._endpoints = [Endpoint.from_dict(endpoint) for endpoint in configuration.get("endpoints", [])]
         except Exception:
             logging.exception("Could not load configuration. Assuming that device is not yet configured...")
@@ -38,7 +42,7 @@ class Repository:
         with self._state_lock:
             json.dump(
                 {
-                    "reader_identifier": self._reader_identifier.hex(),
+                    "reader_group_sub_identifier": self._reader_group_sub_identifier.hex(),
                     "endpoints": [endpoint.to_dict() for endpoint in self._endpoints],
                 },
                 open(self.storage_file_path, "w"),
@@ -56,12 +60,12 @@ class Repository:
         with self._transaction_lock:
             self._reader_private_key = reader_private_key
 
-    def get_reader_instance_identifier(self):
-        return self._reader_identifier
+    def get_reader_group_sub_identifier(self):
+        return self._reader_group_sub_identifier
 
-    def set_reader_identifier(self, reader_identifier):
+    def set_reader_group_sub_identifier(self, reader_group_sub_identifier):
         with self._transaction_lock:
-            self._reader_identifier = reader_identifier
+            self._reader_group_sub_identifier = reader_group_sub_identifier
 
     def get_reader_group_identifier(self):
         return self._reader_group_identifier

@@ -76,7 +76,7 @@ ls /dev/tty.*
 - `flow`: preferred minimum authentication flow (`fast`, `standard`, `attestation`);
 - `reader_private_key`: reader private key as hex;
 - `reader_group_identifier`: group identifier as hex;
-- `reader_instance_identifier`: instance identifier as hex.
+- `reader_group_sub_identifier`: reader group sub-identifier as hex.
 
 
 ## Project Structure

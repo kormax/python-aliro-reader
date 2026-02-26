@@ -4,7 +4,7 @@ import signal
 import sys
 import time
 
-from aliro import AliroFlow, AliroTransactionType, ProtocolError, read_aliro
+from aliro.protocol import AliroFlow, AliroTransactionType, ProtocolError, read_aliro
 from repository import Repository
 from util.afclf import AnnotationFrameContactlessFrontend, ISODEPTag, RemoteTarget, activate
 from util.ecp import ECP
@@ -41,7 +41,7 @@ def configure_repository(config: dict, repository=None):
     repository = repository or Repository(config["persist"])
     reader_private_key_hex = config.get("reader_private_key")
     reader_group_identifier_hex = config.get("reader_group_identifier")
-    reader_instance_identifier_hex = config.get("reader_instance_identifier")
+    reader_group_sub_identifier_hex = config.get("reader_group_sub_identifier")
 
     if reader_private_key_hex:
         repository.set_reader_private_key(bytes.fromhex(reader_private_key_hex))
@@ -51,12 +51,12 @@ def configure_repository(config: dict, repository=None):
     )
     repository.set_reader_group_identifier(reader_group_identifier)
 
-    reader_identifier = (
-        bytes.fromhex(reader_instance_identifier_hex)
-        if reader_instance_identifier_hex
+    reader_group_sub_identifier = (
+        bytes.fromhex(reader_group_sub_identifier_hex)
+        if reader_group_sub_identifier_hex
         else bytes.fromhex("00" * len(reader_group_identifier))
     )
-    repository.set_reader_identifier(reader_identifier)
+    repository.set_reader_group_sub_identifier(reader_group_sub_identifier)
     return repository
 
 
@@ -132,7 +132,7 @@ def read_aliro_once(  # noqa: C901
             flow=flow,
             transaction_code=AliroTransactionType.UNLOCK,
             reader_group_identifier=repository.get_reader_group_identifier(),
-            reader_instance_identifier=repository.get_reader_instance_identifier(),
+            reader_group_sub_identifier=repository.get_reader_group_sub_identifier(),
             reader_private_key=repository.get_reader_private_key(),
             key_size=16,
             mailbox_data=command,

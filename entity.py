@@ -39,9 +39,9 @@ class Endpoint:
     key_type: KeyType
     public_key: bytes
     persistent_key: bytes
-    identifier: bytes | None = None
-    issued_at: bytes | None = None
-    expires_at: bytes | None = None
+    key_slot: bytes | None = None
+    credential_signed_timestamp: bytes | None = None
+    revocation_signed_timestamp: bytes | None = None
     last_fci_template: bytes | None = None
     last_protocol_version: bytes | None = None
     last_auth_flow: str | None = None
@@ -53,11 +53,11 @@ class Endpoint:
 
     @classmethod
     def from_dict(cls, endpoint: dict):
-        identifier = endpoint.get("identifier")
-        if isinstance(identifier, (bytes, bytearray)):
-            identifier = identifier.hex()
-        issued_at = _parse_hex_value(endpoint.get("issued_at"))
-        expires_at = _parse_hex_value(endpoint.get("expires_at"))
+        key_slot = endpoint.get("key_slot")
+        if isinstance(key_slot, (bytes, bytearray)):
+            key_slot = key_slot.hex()
+        credential_signed_timestamp = _parse_hex_value(endpoint.get("credential_signed_timestamp"))
+        revocation_signed_timestamp = _parse_hex_value(endpoint.get("revocation_signed_timestamp"))
         last_fci_template = _parse_hex_value(endpoint.get("last_fci_template") or endpoint.get("fci_template"))
         last_protocol_version = _parse_hex_value(
             endpoint.get("last_protocol_version") or endpoint.get("protocol_version")
@@ -70,9 +70,9 @@ class Endpoint:
             _parse_key_type(endpoint.get("key_type", "secp256r1")),
             bytes.fromhex(endpoint.get("public_key", "04" + ("00" * 32))),
             bytes.fromhex(endpoint.get("persistent_key", "00" * 32)),
-            identifier=bytes.fromhex(identifier) if identifier else None,
-            issued_at=issued_at,
-            expires_at=expires_at,
+            key_slot=bytes.fromhex(key_slot) if key_slot else None,
+            credential_signed_timestamp=credential_signed_timestamp,
+            revocation_signed_timestamp=revocation_signed_timestamp,
             last_fci_template=last_fci_template,
             last_protocol_version=last_protocol_version,
             last_auth_flow=last_auth_flow,
@@ -83,12 +83,16 @@ class Endpoint:
         result = {
             "last_used_at": self.last_used_at,
             "counter": self.counter,
-            "identifier": self.identifier.hex() if self.identifier else None,
+            "key_slot": self.key_slot.hex() if self.key_slot else None,
             "key_type": self.key_type.value,
             "public_key": self.public_key.hex(),
             "persistent_key": self.persistent_key.hex(),
-            "issued_at": self.issued_at.hex() if self.issued_at else None,
-            "expires_at": self.expires_at.hex() if self.expires_at else None,
+            "credential_signed_timestamp": (
+                self.credential_signed_timestamp.hex() if self.credential_signed_timestamp else None
+            ),
+            "revocation_signed_timestamp": (
+                self.revocation_signed_timestamp.hex() if self.revocation_signed_timestamp else None
+            ),
             "last_fci_template": self.last_fci_template.hex() if self.last_fci_template else None,
             "last_protocol_version": self.last_protocol_version.hex() if self.last_protocol_version else None,
             "last_auth_flow": self.last_auth_flow,
@@ -101,10 +105,18 @@ class Endpoint:
     def __repr__(self) -> str:
         return (
             f"Endpoint(last_used_at={self.last_used_at}, counter={self.counter}"
-            + f", identifier={self.identifier.hex() if self.identifier else None} key_type={represent(self.key_type)}"
+            + f", key_slot={self.key_slot.hex() if self.key_slot else None} key_type={represent(self.key_type)}"
             + f", public_key={self.public_key.hex()}; persistent_key={self.persistent_key.hex()}"
-            + f", issued_at={self.issued_at.hex() if self.issued_at else None}"
-            + f", expires_at={self.expires_at.hex() if self.expires_at else None}"
+            + (
+                f", credential_signed_timestamp={self.credential_signed_timestamp.hex()}"
+                if self.credential_signed_timestamp
+                else ", credential_signed_timestamp=None"
+            )
+            + (
+                f", revocation_signed_timestamp={self.revocation_signed_timestamp.hex()}"
+                if self.revocation_signed_timestamp
+                else ", revocation_signed_timestamp=None"
+            )
             + f", last_fci_template={self.last_fci_template.hex() if self.last_fci_template else None}"
             + f", last_protocol_version={self.last_protocol_version.hex() if self.last_protocol_version else None}"
             + f", last_auth_flow={self.last_auth_flow}"
