@@ -82,7 +82,7 @@ ls /dev/tty.*
 ## Project Structure
 
 - [`main.py`](./main.py): runtime entrypoint, configuration loading, NFC loop, signal handling;
-- [`aliro.py`](./aliro.py): core Aliro protocol/authentication logic;
+- [`aliro/`](./aliro): core Aliro protocol/authentication logic module;
 - [`repository.py`](./repository.py): state persistence for reader metadata/endpoints;
 - [`entity.py`](./entity.py): protocol and endpoint entities;
 - [`util/afclf.py`](./util/afclf.py): modified contactless frontend transport helpers;

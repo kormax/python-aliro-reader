@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import List
 
+from aliro.signaling_bitmask import SignalingBitmask
 from util.structable import represent
 
 
@@ -23,6 +24,14 @@ def _parse_key_type(value) -> KeyType:
     return KeyType(value)
 
 
+def _parse_hex_value(value):
+    if value is None:
+        return None
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value)
+    return bytes.fromhex(str(value))
+
+
 @dataclass
 class Endpoint:
     last_used_at: int
@@ -36,7 +45,7 @@ class Endpoint:
     last_fci_template: bytes | None = None
     last_protocol_version: bytes | None = None
     last_auth_flow: str | None = None
-    last_auth_status: bytes | None = None
+    last_signaling_bitmask: SignalingBitmask | None = None
 
     @property
     def id(self):
@@ -47,12 +56,14 @@ class Endpoint:
         identifier = endpoint.get("identifier")
         if isinstance(identifier, (bytes, bytearray)):
             identifier = identifier.hex()
-        issued_at = endpoint.get("issued_at")
-        expires_at = endpoint.get("expires_at")
-        last_fci_template = endpoint.get("last_fci_template") or endpoint.get("fci_template")
-        last_protocol_version = endpoint.get("last_protocol_version") or endpoint.get("protocol_version")
+        issued_at = _parse_hex_value(endpoint.get("issued_at"))
+        expires_at = _parse_hex_value(endpoint.get("expires_at"))
+        last_fci_template = _parse_hex_value(endpoint.get("last_fci_template") or endpoint.get("fci_template"))
+        last_protocol_version = _parse_hex_value(
+            endpoint.get("last_protocol_version") or endpoint.get("protocol_version")
+        )
         last_auth_flow = endpoint.get("last_auth_flow")
-        auth_status = endpoint.get("last_auth_status") or endpoint.get("auth_status")
+        signaling_bitmask = SignalingBitmask.parse(endpoint.get("last_signaling_bitmask"))
         return Endpoint(
             endpoint.get("last_used_at", 0),
             endpoint.get("counter", 0),
@@ -60,12 +71,12 @@ class Endpoint:
             bytes.fromhex(endpoint.get("public_key", "04" + ("00" * 32))),
             bytes.fromhex(endpoint.get("persistent_key", "00" * 32)),
             identifier=bytes.fromhex(identifier) if identifier else None,
-            issued_at=bytes.fromhex(issued_at) if issued_at else None,
-            expires_at=bytes.fromhex(expires_at) if expires_at else None,
-            last_fci_template=bytes.fromhex(last_fci_template) if last_fci_template else None,
-            last_protocol_version=bytes.fromhex(last_protocol_version) if last_protocol_version else None,
+            issued_at=issued_at,
+            expires_at=expires_at,
+            last_fci_template=last_fci_template,
+            last_protocol_version=last_protocol_version,
             last_auth_flow=last_auth_flow,
-            last_auth_status=bytes.fromhex(auth_status) if auth_status else None,
+            last_signaling_bitmask=signaling_bitmask,
         )
 
     def to_dict(self):
@@ -81,7 +92,9 @@ class Endpoint:
             "last_fci_template": self.last_fci_template.hex() if self.last_fci_template else None,
             "last_protocol_version": self.last_protocol_version.hex() if self.last_protocol_version else None,
             "last_auth_flow": self.last_auth_flow,
-            "last_auth_status": self.last_auth_status.hex() if self.last_auth_status else None,
+            "last_signaling_bitmask": self.last_signaling_bitmask.to_names()
+            if self.last_signaling_bitmask is not None
+            else None,
         }
         return result
 
@@ -95,7 +108,8 @@ class Endpoint:
             + f", last_fci_template={self.last_fci_template.hex() if self.last_fci_template else None}"
             + f", last_protocol_version={self.last_protocol_version.hex() if self.last_protocol_version else None}"
             + f", last_auth_flow={self.last_auth_flow}"
-            + f", last_auth_status={self.last_auth_status.hex() if self.last_auth_status else None})"
+            + f", last_signaling_bitmask={self.last_signaling_bitmask!r}"
+            + ")"
         )
 
 

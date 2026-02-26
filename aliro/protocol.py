@@ -27,6 +27,8 @@ from util.iso7816 import ISO7816, ISO7816Application, ISO7816Command, ISO7816Ins
 from util.structable import chunked, to_bytes
 from util.tlv.ber import BerTLV, BerTLVMessage
 
+from .signaling_bitmask import SignalingBitmask
+
 PERSISTENT_ASTR = "Persistent**"
 VOLATILE_FAST = "VolatileFast"
 VOLATILE_ASTR = "Volatile****"
@@ -386,10 +388,11 @@ def fast_auth(
         if len(auth_status_value) != 2 or len(issued_at) != 0x14 or len(expires_at) != 0x14:
             logging.info("AUTH0 fast cryptogram plaintext length mismatch")
             continue
+        signaling_bitmask = SignalingBitmask.parse(auth_status_value)
 
         logging.info(
             "AUTH0 fast cryptogram verified"
-            f" auth_status=0x{auth_status_value.hex()}"
+            f" signaling_bitmask={signaling_bitmask!r}"
             f" issued_at={issued_at}"
             f" expires_at={expires_at}"
         )
@@ -428,7 +431,7 @@ def fast_auth(
         logging.info(f"Derived secure context: {secure!r}")
         endpoint.issued_at = issued_at
         endpoint.expires_at = expires_at
-        endpoint.last_auth_status = auth_status_value
+        endpoint.last_signaling_bitmask = signaling_bitmask
         matched_endpoint = endpoint
         matched_secure = secure
         break
@@ -591,6 +594,7 @@ def standard_auth(  # noqa: C901
     issued_at = tlv_array.find_by_tag_else_empty(0x91).value
     expires_at = tlv_array.find_by_tag_else_empty(0x92).value
     auth_status = tlv_array.find_by_tag_else_empty(0x5E).value
+    signaling_bitmask = SignalingBitmask.parse(auth_status)
 
     endpoint = None
     endpoint_public_key = None
@@ -607,7 +611,8 @@ def standard_auth(  # noqa: C901
 
     logging.info(
         "AUTH1 response"
-        f" auth_status={auth_status.hex() if auth_status else None}"
+        f" signaling={auth_status.hex() if auth_status else None}"
+        f" signaling_bitmask={signaling_bitmask!r}"
         f" issued_at={issued_at},"
         f" expires_at={expires_at},"
         f" endpoint_identifier={endpoint_identifier.hex() if endpoint_identifier else None}"
@@ -664,12 +669,12 @@ def standard_auth(  # noqa: C901
             persistent_key=k_persistent,
             identifier=endpoint_identifier,
             issued_at=issued_at,
-            last_auth_status=auth_status,
+            last_signaling_bitmask=signaling_bitmask,
         )
     else:
         endpoint.persistent_key = k_persistent
         endpoint.issued_at = issued_at
-        endpoint.last_auth_status = auth_status
+        endpoint.last_signaling_bitmask = signaling_bitmask
     return k_persistent, endpoint, secure
 
 
