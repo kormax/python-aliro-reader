@@ -28,6 +28,7 @@ from util.structable import chunked, to_bytes
 from util.tlv.ber import BerTLV, BerTLVMessage
 
 from .authentication_policy import AuthenticationPolicy
+from .interface import Interface
 from .signaling_bitmask import SignalingBitmask
 
 PERSISTENT_ASTR = "Persistent**"
@@ -61,10 +62,6 @@ class AliroFlow(IntEnum):
     FAST = 0x00
     STANDARD = 0x01
     ATTESTATION = 0x02
-
-
-class TransportType(IntEnum):
-    NFC = CONTACTLESS = 0x5E
 
 
 class AliroSecureChannel:
@@ -270,7 +267,7 @@ def fast_auth(
     tag: ISO7816Tag,
     fci_proprietary_template: List[bytes],
     protocol_version: bytes,
-    transport_type: int,
+    interface: Interface,
     transaction_flags: int,
     authentication_policy: AuthenticationPolicy,
     reader_group_identifier: bytes,
@@ -341,7 +338,7 @@ def fast_auth(
             reader_public_key_x,
             VOLATILE_FAST,
             reader_group_identifier + reader_group_sub_identifier,
-            transport_type,
+            interface,
             BerTLV(0x5C, value=protocol_version),
             reader_ephemeral_public_key_x,
             transaction_identifier,
@@ -431,7 +428,7 @@ def standard_auth(  # noqa: C901
     tag: ISO7816Tag,
     fci_proprietary_template: List[bytes],
     protocol_version: bytes,
-    transport_type: int,
+    interface: Interface,
     transaction_flags: int,
     authentication_policy: AuthenticationPolicy,
     reader_group_identifier: bytes,
@@ -499,7 +496,7 @@ def standard_auth(  # noqa: C901
             reader_public_key_x,
             VOLATILE_ASTR,
             reader_group_identifier + reader_group_sub_identifier,
-            transport_type,
+            interface,
             BerTLV(0x5C, value=protocol_version),
             reader_ephemeral_public_key_x,
             transaction_identifier,
@@ -631,7 +628,7 @@ def standard_auth(  # noqa: C901
         reader_public_key_x,
         PERSISTENT_ASTR,
         reader_group_identifier + reader_group_sub_identifier,
-        transport_type,
+        interface,
         BerTLV(0x5C, value=protocol_version),
         reader_ephemeral_public_key_x,
         transaction_identifier,
@@ -809,7 +806,7 @@ def perform_authentication_flow(
     transaction_identifier: bytes,
     transaction_flags: int,
     authentication_policy: AuthenticationPolicy,
-    transport_type: int,
+    interface: Interface,
     endpoints: List[Endpoint],
     mailbox_data=b"",
     key_size=16,
@@ -823,7 +820,7 @@ def perform_authentication_flow(
         tag=tag,
         fci_proprietary_template=fci_proprietary_template,
         protocol_version=protocol_version,
-        transport_type=transport_type,
+        interface=interface,
         transaction_flags=transaction_flags,
         authentication_policy=authentication_policy,
         reader_group_identifier=reader_group_identifier,
@@ -851,7 +848,7 @@ def perform_authentication_flow(
         tag=tag,
         fci_proprietary_template=fci_proprietary_template,
         protocol_version=protocol_version,
-        transport_type=transport_type,
+        interface=interface,
         transaction_flags=transaction_flags,
         authentication_policy=authentication_policy,
         transaction_identifier=transaction_identifier,
@@ -898,7 +895,7 @@ def read_aliro(
     reader_ephemeral_private_key: bytes | None = None,
     # Generated at random if not provided
     transaction_identifier: bytes | None = None,
-    transport_type=TransportType.NFC,
+    interface=Interface.NFC,
     key_size=16,
     mailbox_data: bytes = b"",
 ) -> Tuple[AliroFlow, Endpoint | None]:
@@ -946,7 +943,7 @@ def read_aliro(
         transaction_identifier=transaction_identifier or os.urandom(16),
         transaction_flags=transaction_flags,
         authentication_policy=authentication_policy,
-        transport_type=transport_type,
+        interface=interface,
         endpoints=endpoints,
         key_size=key_size,
         mailbox_data=mailbox_data,
