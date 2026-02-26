@@ -11,8 +11,8 @@
         "persist": "persist.json",
         "flow": "fast",
         "authentication_policy": "user_device_setting",
-        "load_cert": true,
 
+        "reader_certificate": false,
         "reader_private_key": "0000000000000000000000000000000000000000000000000000000000000001",
         "reader_group_identifier": "00000000000000000000000000000000",
         "reader_group_sub_identifier": "00000000000000000000000000000000"

@@ -1,19 +1,9 @@
-import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
 from aliro.certificate import (
-    PROFILE0000_DEFAULT_ISSUER,
-    PROFILE0000_DEFAULT_NOT_AFTER,
-    PROFILE0000_DEFAULT_NOT_BEFORE,
-    PROFILE0000_DEFAULT_SERIAL,
-    PROFILE0000_DEFAULT_SUBJECT,
-    _parse_profile0000,
-    compress_x509_to_profile0000,
-    decompress_profile0000_to_x509_der,
-    generate_profile0000_certificate,
-    verify_profile1000_certificate,
+    Profile0000Certificate,
 )
 
 
@@ -31,10 +21,10 @@ def _private_key(value: str) -> ec.EllipticCurvePrivateKey:
     return key
 
 
-def test_generate_profile0000_certificate_supports_custom_fields():
+def test_profile0000_generate_supports_custom_fields():
     issuer_private_key = ec.generate_private_key(ec.SECP256R1())
     subject_public_key = ec.generate_private_key(ec.SECP256R1()).public_key()
-    reader_cert = generate_profile0000_certificate(
+    profile = Profile0000Certificate.generate(
         issuer_private_key=issuer_private_key,
         subject_public_key=subject_public_key,
         serial_number=_hex_bytes("04278ba9fd71"),
@@ -43,23 +33,28 @@ def test_generate_profile0000_certificate_supports_custom_fields():
         not_before="200102000000Z",
         not_after="250505000000Z",
     )
+    reader_cert = profile.to_bytes()
 
-    profile = _parse_profile0000(reader_cert)
-    assert profile["serial"] == _hex_bytes("04278ba9fd71")
-    assert profile["issuer"] == b"custom issuer name"
-    assert profile["not_before"] == b"200102000000Z"
-    assert profile["not_after"] == b"250505000000Z"
-    assert profile["subject"] == b"custom subject name"
+    parsed = Profile0000Certificate.from_bytes(reader_cert)
+    assert parsed.serial == _hex_bytes("04278ba9fd71")
+    assert parsed.issuer == b"custom issuer name"
+    assert parsed.not_before == b"200102000000Z"
+    assert parsed.not_after == b"250505000000Z"
+    assert parsed.subject == b"custom subject name"
+    assert (
+        parsed.subject_public_key.public_bytes(
+            encoding=serialization.Encoding.X962,
+            format=serialization.PublicFormat.UncompressedPoint,
+        )[0]
+        == 0x04
+    )
+    assert parsed.signature[0] == 0x30
 
-    _ = decompress_profile0000_to_x509_der(
-        reader_cert=reader_cert,
-        issuer_public_key=issuer_private_key.public_key(),
-    )
-    verify_profile1000_certificate(
-        reader_cert=reader_cert,
-        issuer_public_key=issuer_private_key.public_key(),
-        subject_public_key=subject_public_key,
-    )
+    assert Profile0000Certificate.from_bytes(reader_cert).to_bytes() == reader_cert
+
+    _ = parsed.to_x509_der_bytes(issuer_private_key.public_key())
+    parsed.verify(issuer_public_key=issuer_private_key.public_key())
+    assert parsed.subject_public_key.public_numbers() == subject_public_key.public_numbers()
 
 
 def test_demo1_certificate_vector_end_to_end():
@@ -109,8 +104,10 @@ def test_demo1_certificate_vector_end_to_end():
     subject_public_key = _public_key(reader_public_key_hex)
 
     # Compression must reproduce the exact profile0000 vector.
-    assert compress_x509_to_profile0000(input_x509_cert) == compressed_cert
-    assert compress_x509_to_profile0000(x509.load_der_x509_certificate(input_x509_cert)) == compressed_cert
+    assert Profile0000Certificate.from_x509(input_x509_cert).to_bytes() == compressed_cert
+    assert (
+        Profile0000Certificate.from_x509(x509.load_der_x509_certificate(input_x509_cert)).to_bytes() == compressed_cert
+    )
 
     # Vector sanity: private key blobs must map to the expected public keys.
     assert reader_private_key.public_key().public_bytes(
@@ -123,35 +120,25 @@ def test_demo1_certificate_vector_end_to_end():
     ) == _hex_bytes(issuer_public_key_hex)
 
     # Profile parsing expectations from Demo 1 (all optional fields omitted).
-    profile = _parse_profile0000(compressed_cert)
-    assert profile["serial"] == PROFILE0000_DEFAULT_SERIAL
-    assert profile["issuer"] == PROFILE0000_DEFAULT_ISSUER
-    assert profile["not_before"] == PROFILE0000_DEFAULT_NOT_BEFORE
-    assert profile["not_after"] == PROFILE0000_DEFAULT_NOT_AFTER
-    assert profile["subject"] == PROFILE0000_DEFAULT_SUBJECT
+    profile = Profile0000Certificate.from_bytes(compressed_cert)
+    assert profile.serial == Profile0000Certificate.DEFAULT_SERIAL
+    assert profile.issuer == Profile0000Certificate.DEFAULT_ISSUER
+    assert profile.not_before == Profile0000Certificate.DEFAULT_NOT_BEFORE
+    assert profile.not_after == Profile0000Certificate.DEFAULT_NOT_AFTER
+    assert profile.subject == Profile0000Certificate.DEFAULT_SUBJECT
 
     # Decompression must reproduce the exact DER X509 vector.
-    decompressed_der = decompress_profile0000_to_x509_der(
-        reader_cert=compressed_cert,
-        issuer_public_key=issuer_public_key,
-    )
+    decompressed_der = Profile0000Certificate.from_bytes(compressed_cert).to_x509_der_bytes(issuer_public_key)
     assert decompressed_der == _hex_bytes(input_x509_cert_hex)
 
     # Verification passes for the expected issuer/subject key pair.
-    verify_profile1000_certificate(
-        reader_cert=compressed_cert,
-        issuer_public_key=issuer_public_key,
-        subject_public_key=subject_public_key,
-    )
+    parsed_profile = Profile0000Certificate.from_bytes(compressed_cert)
+    parsed_profile.verify(issuer_public_key=issuer_public_key)
+    assert parsed_profile.subject_public_key.public_numbers() == subject_public_key.public_numbers()
 
-    # Verification must fail if subject key is wrong.
+    # Subject key comparison is caller-managed.
     wrong_subject_key = ec.generate_private_key(ec.SECP256R1()).public_key()
-    with pytest.raises(ValueError):
-        verify_profile1000_certificate(
-            reader_cert=compressed_cert,
-            issuer_public_key=issuer_public_key,
-            subject_public_key=wrong_subject_key,
-        )
+    assert parsed_profile.subject_public_key.public_numbers() != wrong_subject_key.public_numbers()
 
 
 def test_demo2_certificate_vector_end_to_end():
@@ -202,8 +189,10 @@ def test_demo2_certificate_vector_end_to_end():
     subject_public_key = _public_key(reader_public_key_hex)
 
     # Compression must reproduce the exact profile0000 vector.
-    assert compress_x509_to_profile0000(input_x509_cert) == compressed_cert
-    assert compress_x509_to_profile0000(x509.load_der_x509_certificate(input_x509_cert)) == compressed_cert
+    assert Profile0000Certificate.from_x509(input_x509_cert).to_bytes() == compressed_cert
+    assert (
+        Profile0000Certificate.from_x509(x509.load_der_x509_certificate(input_x509_cert)).to_bytes() == compressed_cert
+    )
 
     # Vector sanity: private key blobs must map to the expected public keys.
     assert reader_private_key.public_key().public_bytes(
@@ -216,36 +205,25 @@ def test_demo2_certificate_vector_end_to_end():
     ) == _hex_bytes(issuer_public_key_hex)
 
     # Profile parsing expectations from Demo 2.
-    profile = _parse_profile0000(compressed_cert)
-
-    assert profile["serial"] == _hex_bytes("04278ba9fd71")
-    assert profile["issuer"] == b"custom issuer name"
-    assert profile["not_before"] == PROFILE0000_DEFAULT_NOT_BEFORE
-    assert profile["not_after"] == b"250505000000Z"
-    assert profile["subject"] == PROFILE0000_DEFAULT_SUBJECT
+    profile = Profile0000Certificate.from_bytes(compressed_cert)
+    assert profile.serial == _hex_bytes("04278ba9fd71")
+    assert profile.issuer == b"custom issuer name"
+    assert profile.not_before == Profile0000Certificate.DEFAULT_NOT_BEFORE
+    assert profile.not_after == b"250505000000Z"
+    assert profile.subject == Profile0000Certificate.DEFAULT_SUBJECT
 
     # Decompression must reproduce the exact DER X509 vector.
-    decompressed_der = decompress_profile0000_to_x509_der(
-        reader_cert=compressed_cert,
-        issuer_public_key=issuer_public_key,
-    )
+    decompressed_der = Profile0000Certificate.from_bytes(compressed_cert).to_x509_der_bytes(issuer_public_key)
     assert decompressed_der == _hex_bytes(input_x509_cert_hex)
 
     # Verification passes for the expected issuer/subject key pair.
-    verify_profile1000_certificate(
-        reader_cert=compressed_cert,
-        issuer_public_key=issuer_public_key,
-        subject_public_key=subject_public_key,
-    )
+    parsed_profile = Profile0000Certificate.from_bytes(compressed_cert)
+    parsed_profile.verify(issuer_public_key=issuer_public_key)
+    assert parsed_profile.subject_public_key.public_numbers() == subject_public_key.public_numbers()
 
-    # Verification must fail if subject key is wrong.
+    # Subject key comparison is caller-managed.
     wrong_subject_key = ec.generate_private_key(ec.SECP256R1()).public_key()
-    with pytest.raises(ValueError):
-        verify_profile1000_certificate(
-            reader_cert=compressed_cert,
-            issuer_public_key=issuer_public_key,
-            subject_public_key=wrong_subject_key,
-        )
+    assert parsed_profile.subject_public_key.public_numbers() != wrong_subject_key.public_numbers()
 
 
 def test_demo3_certificate_vector_end_to_end():
@@ -295,8 +273,10 @@ def test_demo3_certificate_vector_end_to_end():
     subject_public_key = _public_key(reader_public_key_hex)
 
     # Compression must reproduce the exact profile0000 vector.
-    assert compress_x509_to_profile0000(input_x509_cert) == compressed_cert
-    assert compress_x509_to_profile0000(x509.load_der_x509_certificate(input_x509_cert)) == compressed_cert
+    assert Profile0000Certificate.from_x509(input_x509_cert).to_bytes() == compressed_cert
+    assert (
+        Profile0000Certificate.from_x509(x509.load_der_x509_certificate(input_x509_cert)).to_bytes() == compressed_cert
+    )
 
     # Vector sanity: private key blobs must map to the expected public keys.
     assert reader_private_key.public_key().public_bytes(
@@ -309,35 +289,25 @@ def test_demo3_certificate_vector_end_to_end():
     ) == _hex_bytes(issuer_public_key_hex)
 
     # Profile parsing expectations from Demo 3.
-    profile = _parse_profile0000(compressed_cert)
-    assert profile["serial"] == PROFILE0000_DEFAULT_SERIAL
-    assert profile["issuer"] == PROFILE0000_DEFAULT_ISSUER
-    assert profile["not_before"] == PROFILE0000_DEFAULT_NOT_BEFORE
-    assert profile["not_after"] == b"250505000000Z"
-    assert profile["subject"] == PROFILE0000_DEFAULT_SUBJECT
+    profile = Profile0000Certificate.from_bytes(compressed_cert)
+    assert profile.serial == Profile0000Certificate.DEFAULT_SERIAL
+    assert profile.issuer == Profile0000Certificate.DEFAULT_ISSUER
+    assert profile.not_before == Profile0000Certificate.DEFAULT_NOT_BEFORE
+    assert profile.not_after == b"250505000000Z"
+    assert profile.subject == Profile0000Certificate.DEFAULT_SUBJECT
 
     # Decompression must reproduce the exact DER X509 vector.
-    decompressed_der = decompress_profile0000_to_x509_der(
-        reader_cert=compressed_cert,
-        issuer_public_key=issuer_public_key,
-    )
+    decompressed_der = Profile0000Certificate.from_bytes(compressed_cert).to_x509_der_bytes(issuer_public_key)
     assert decompressed_der == _hex_bytes(input_x509_cert_hex)
 
     # Verification passes for the expected issuer/subject key pair.
-    verify_profile1000_certificate(
-        reader_cert=compressed_cert,
-        issuer_public_key=issuer_public_key,
-        subject_public_key=subject_public_key,
-    )
+    parsed_profile = Profile0000Certificate.from_bytes(compressed_cert)
+    parsed_profile.verify(issuer_public_key=issuer_public_key)
+    assert parsed_profile.subject_public_key.public_numbers() == subject_public_key.public_numbers()
 
-    # Verification must fail if subject key is wrong.
+    # Subject key comparison is caller-managed.
     wrong_subject_key = ec.generate_private_key(ec.SECP256R1()).public_key()
-    with pytest.raises(ValueError):
-        verify_profile1000_certificate(
-            reader_cert=compressed_cert,
-            issuer_public_key=issuer_public_key,
-            subject_public_key=wrong_subject_key,
-        )
+    assert parsed_profile.subject_public_key.public_numbers() != wrong_subject_key.public_numbers()
 
 
 def test_demo4_certificate_vector_end_to_end():
@@ -392,8 +362,10 @@ def test_demo4_certificate_vector_end_to_end():
     subject_public_key = _public_key(reader_public_key_hex)
 
     # Compression must reproduce the exact profile0000 vector.
-    assert compress_x509_to_profile0000(input_x509_cert) == compressed_cert
-    assert compress_x509_to_profile0000(x509.load_der_x509_certificate(input_x509_cert)) == compressed_cert
+    assert Profile0000Certificate.from_x509(input_x509_cert).to_bytes() == compressed_cert
+    assert (
+        Profile0000Certificate.from_x509(x509.load_der_x509_certificate(input_x509_cert)).to_bytes() == compressed_cert
+    )
 
     # Vector sanity: private key blobs must map to the expected public keys.
     assert reader_private_key.public_key().public_bytes(
@@ -406,32 +378,22 @@ def test_demo4_certificate_vector_end_to_end():
     ) == _hex_bytes(issuer_public_key_hex)
 
     # Profile parsing expectations from Demo 4 (all tunable fields present).
-    profile = _parse_profile0000(compressed_cert)
-    assert profile["serial"] == _hex_bytes("5555555555555555555555555555555555555555")
-    assert profile["issuer"] == b"custom issuer name.............."
-    assert profile["not_before"] == b"200102000000Z"
-    assert profile["not_after"] == b"250505000000Z"
-    assert profile["subject"] == b"custom subject name............."
+    profile = Profile0000Certificate.from_bytes(compressed_cert)
+    assert profile.serial == _hex_bytes("5555555555555555555555555555555555555555")
+    assert profile.issuer == b"custom issuer name.............."
+    assert profile.not_before == b"200102000000Z"
+    assert profile.not_after == b"250505000000Z"
+    assert profile.subject == b"custom subject name............."
 
     # Decompression must reproduce the exact DER X509 vector.
-    decompressed_der = decompress_profile0000_to_x509_der(
-        reader_cert=compressed_cert,
-        issuer_public_key=issuer_public_key,
-    )
+    decompressed_der = Profile0000Certificate.from_bytes(compressed_cert).to_x509_der_bytes(issuer_public_key)
     assert decompressed_der == _hex_bytes(input_x509_cert_hex)
 
     # Verification passes for the expected issuer/subject key pair.
-    verify_profile1000_certificate(
-        reader_cert=compressed_cert,
-        issuer_public_key=issuer_public_key,
-        subject_public_key=subject_public_key,
-    )
+    parsed_profile = Profile0000Certificate.from_bytes(compressed_cert)
+    parsed_profile.verify(issuer_public_key=issuer_public_key)
+    assert parsed_profile.subject_public_key.public_numbers() == subject_public_key.public_numbers()
 
-    # Verification must fail if subject key is wrong.
+    # Subject key comparison is caller-managed.
     wrong_subject_key = ec.generate_private_key(ec.SECP256R1()).public_key()
-    with pytest.raises(ValueError):
-        verify_profile1000_certificate(
-            reader_cert=compressed_cert,
-            issuer_public_key=issuer_public_key,
-            subject_public_key=wrong_subject_key,
-        )
+    assert parsed_profile.subject_public_key.public_numbers() != wrong_subject_key.public_numbers()

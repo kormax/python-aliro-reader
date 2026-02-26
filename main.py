@@ -4,12 +4,16 @@ import signal
 import sys
 import time
 
+from cryptography.hazmat.primitives.asymmetric import ec
+
 from aliro.authentication_policy import AuthenticationPolicy
+from aliro.certificate import Profile0000Certificate
 from aliro.flow import AliroFlow
 from aliro.protocol import ProtocolError, read_aliro
 from repository import Repository
 from util.afclf import AnnotationFrameContactlessFrontend, ISODEPTag, RemoteTarget, activate
 from util.ecp import ECP
+from util.general import hex_or_base64_to_bytes
 from util.iso7816 import ISO7816Tag
 
 # By default, this file is located in the same folder as the project
@@ -19,6 +23,50 @@ CONFIGURATION_FILE_PATH = "configuration.json"
 def load_configuration(path=CONFIGURATION_FILE_PATH) -> dict:
     with open(path) as f:
         return json.load(f)
+
+
+def resolve_reader_certificate(
+    reader_certificate,
+    reader_private_key: bytes | None,
+) -> tuple[bytes | None, bytes | None]:
+    if reader_certificate in (None, False):
+        return None, None
+
+    if reader_certificate is True:
+        if reader_private_key in (None, b""):
+            raise ValueError("aliro.reader_certificate=true requires aliro.reader_private_key")
+        issuer_private = ec.derive_private_key(int.from_bytes(reader_private_key, "big"), ec.SECP256R1())
+        intermediate_private = ec.generate_private_key(ec.SECP256R1())
+        cert = Profile0000Certificate.generate(
+            issuer_private_key=issuer_private,
+            subject_public_key=intermediate_private.public_key(),
+        ).to_bytes()
+        intermediate_private_bytes = intermediate_private.private_numbers().private_value.to_bytes(32, "big")
+        logging.info(f"Generated intermediate reader private key bytes: {intermediate_private_bytes.hex()}")
+        logging.info(f"Generated reader_certificate bytes: {cert.hex()}")
+        logging.info(
+            f"Generated reader_certificate from reader_private_key on startup ({len(cert)} bytes); "
+            "replacing active reader_private_key with generated intermediate key",
+        )
+        return cert, intermediate_private_bytes
+
+    if isinstance(reader_certificate, str):
+        try:
+            cert = hex_or_base64_to_bytes(reader_certificate)
+        except ValueError as exc:
+            raise ValueError("aliro.reader_certificate must be hex or base64 when provided as string") from exc
+        profile = Profile0000Certificate.from_bytes(cert)
+        if reader_private_key not in (None, b""):
+            reader_public = ec.derive_private_key(
+                int.from_bytes(reader_private_key, "big"),
+                ec.SECP256R1(),
+            ).public_key()
+            if profile.subject_public_key.public_numbers() != reader_public.public_numbers():
+                raise ValueError("Configured reader_certificate subject key does not match reader_private_key")
+        logging.info(f"Loaded reader_certificate from configuration ({len(cert)} bytes)")
+        return cert, None
+
+    raise ValueError("aliro.reader_certificate must be true, false/null, hex string, or base64 string")
 
 
 def configure_logging(config: dict):
@@ -47,15 +95,13 @@ def configure_repository(config: dict, repository=None):
     if reader_private_key_hex:
         repository.set_reader_private_key(bytes.fromhex(reader_private_key_hex))
 
-    reader_group_identifier = (
-        bytes.fromhex(reader_group_identifier_hex) if reader_group_identifier_hex else bytes.fromhex("00" * 8)
-    )
+    reader_group_identifier = bytes.fromhex(reader_group_identifier_hex) if reader_group_identifier_hex else bytes(8)
     repository.set_reader_group_identifier(reader_group_identifier)
 
     reader_group_sub_identifier = (
         bytes.fromhex(reader_group_sub_identifier_hex)
         if reader_group_sub_identifier_hex
-        else bytes.fromhex("00" * len(reader_group_identifier))
+        else bytes(len(reader_group_identifier))
     )
     repository.set_reader_group_sub_identifier(reader_group_sub_identifier)
     return repository
@@ -68,7 +114,7 @@ def read_aliro_once(  # noqa: C901
     express: bool,
     flow: AliroFlow,
     authentication_policy: AuthenticationPolicy,
-    load_cert_enabled: bool,
+    reader_certificate: bytes | None,
     throttle_polling: float,
     should_run,
 ):
@@ -113,7 +159,7 @@ def read_aliro_once(  # noqa: C901
             preferred_versions=[b"\x00\x09"],  # b"\x01\x00",
             flow=flow,
             authentication_policy=authentication_policy,
-            load_cert_enabled=load_cert_enabled,
+            reader_certificate=reader_certificate,
             reader_group_identifier=repository.get_reader_group_identifier(),
             reader_group_sub_identifier=repository.get_reader_group_sub_identifier(),
             reader_private_key=repository.get_reader_private_key(),
@@ -146,7 +192,7 @@ def run_aliro(
     express: bool,
     flow: AliroFlow,
     authentication_policy: AuthenticationPolicy,
-    load_cert_enabled: bool,
+    reader_certificate: bytes | None,
     throttle_polling: float,
     should_run,
 ):
@@ -166,7 +212,7 @@ def run_aliro(
             express=express,
             flow=flow,
             authentication_policy=authentication_policy,
-            load_cert_enabled=load_cert_enabled,
+            reader_certificate=reader_certificate,
             throttle_polling=throttle_polling,
             should_run=should_run,
         )
@@ -186,7 +232,13 @@ def main():
         flow = AliroFlow.FAST
         logging.warning(f"Digital Key flow {configured_flow} is not supported. Falling back to {flow}")
     authentication_policy = AuthenticationPolicy.parse(config["aliro"].get("authentication_policy", "user"))
-    load_cert_enabled = bool(config["aliro"].get("load_cert", False))
+    reader_certificate_config = config["aliro"].get("reader_certificate", None)
+    reader_certificate, replacement_reader_private_key = resolve_reader_certificate(
+        reader_certificate_config,
+        repository.get_reader_private_key(),
+    )
+    if replacement_reader_private_key is not None:
+        repository.set_reader_private_key(replacement_reader_private_key)
     throttle_polling = float(config["nfc"].get("throttle_polling") or 0.15)
 
     running = True
@@ -209,7 +261,7 @@ def main():
             express=express,
             flow=flow,
             authentication_policy=authentication_policy,
-            load_cert_enabled=load_cert_enabled,
+            reader_certificate=reader_certificate,
             throttle_polling=throttle_polling,
             should_run=should_run,
         )

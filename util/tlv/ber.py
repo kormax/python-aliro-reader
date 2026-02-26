@@ -2,7 +2,8 @@ from enum import Enum
 from typing import Union
 
 from util.structable import to_bytes
-from util.tlv import TLV, TLVMessage
+
+from .tlv import TLV, TLVMessage
 
 
 class BerTLVTagClass(Enum):

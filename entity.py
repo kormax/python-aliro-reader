@@ -53,9 +53,7 @@ class Endpoint:
 
     @classmethod
     def from_dict(cls, endpoint: dict):
-        key_slot = endpoint.get("key_slot")
-        if isinstance(key_slot, (bytes, bytearray)):
-            key_slot = key_slot.hex()
+        key_slot = _parse_hex_value(endpoint.get("key_slot"))
         credential_signed_timestamp = _parse_hex_value(endpoint.get("credential_signed_timestamp"))
         revocation_signed_timestamp = _parse_hex_value(endpoint.get("revocation_signed_timestamp"))
         last_fci_template = _parse_hex_value(endpoint.get("last_fci_template") or endpoint.get("fci_template"))
@@ -70,7 +68,7 @@ class Endpoint:
             _parse_key_type(endpoint.get("key_type", "secp256r1")),
             bytes.fromhex(endpoint.get("public_key", "04" + ("00" * 32))),
             bytes.fromhex(endpoint.get("persistent_key", "00" * 32)),
-            key_slot=bytes.fromhex(key_slot) if key_slot else None,
+            key_slot=key_slot,
             credential_signed_timestamp=credential_signed_timestamp,
             revocation_signed_timestamp=revocation_signed_timestamp,
             last_fci_template=last_fci_template,

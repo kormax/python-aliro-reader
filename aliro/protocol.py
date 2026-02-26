@@ -28,7 +28,6 @@ from util.structable import chunked, to_bytes
 from util.tlv.ber import BerTLV, BerTLVMessage
 
 from .authentication_policy import AuthenticationPolicy
-from .certificate import generate_profile0000_certificate, verify_profile1000_certificate
 from .flow import AliroFlow
 from .interface import Interface
 from .reader_status import ReaderStatus
@@ -464,7 +463,7 @@ def standard_auth(  # noqa: C901
     transaction_identifier: bytes,
     endpoint_ephemeral_public_key: ec.EllipticCurvePublicKey,
     endpoints: List[Endpoint],
-    load_cert_enabled=False,
+    reader_certificate: bytes | None = None,
     key_size=16,
 ) -> Tuple[bytes | None, Endpoint | None, AliroSecureContext | None]:
     reader_ephemeral_public_key = reader_ephemeral_private_key.public_key()
@@ -484,27 +483,9 @@ def standard_auth(  # noqa: C901
     auth_signing_private_key = reader_private_key
     auth_signing_key_source = "reader_private_key"
 
-    if load_cert_enabled:
-        intermediate_reader_private_key = ec.generate_private_key(ec.SECP256R1())
-        reader_cert = generate_profile0000_certificate(
-            issuer_private_key=reader_private_key,
-            subject_public_key=intermediate_reader_private_key.public_key(),
-        )
-        try:
-            verify_profile1000_certificate(
-                reader_cert=reader_cert,
-                issuer_public_key=reader_private_key.public_key(),
-                subject_public_key=intermediate_reader_private_key.public_key(),
-            )
-        except ValueError as exc:
-            raise ProtocolError(str(exc)) from exc
-        auth_signing_private_key = intermediate_reader_private_key
-        auth_signing_key_source = "generated_intermediate_private_key"
-        logging.info(
-            "LOAD_CERT enabled, generated profile0000 with intermediate key and verified locally on-the-fly (%d bytes)",
-            len(reader_cert),
-        )
-        load_cert(tag, reader_cert)
+    if reader_certificate is not None:
+        logging.info("LOAD_CERT enabled via configured reader_certificate (%d bytes)", len(reader_certificate))
+        load_cert(tag, reader_certificate)
 
     signature = auth_signing_private_key.sign(authentication_hash_input, ec.ECDSA(hashes.SHA256()))
     logging.info(f"signature={signature.hex()} ({hex(len(signature))})")
@@ -930,7 +911,7 @@ def perform_authentication_flow(
     transaction_identifier: bytes,
     command_parameters: int,
     authentication_policy: AuthenticationPolicy,
-    load_cert_enabled: bool,
+    reader_certificate: bytes | None,
     interface: Interface,
     endpoints: List[Endpoint],
     key_size=16,
@@ -977,7 +958,7 @@ def perform_authentication_flow(
         reader_ephemeral_private_key=reader_ephemeral_private_key,
         endpoints=endpoints,
         endpoint_ephemeral_public_key=endpoint_ephemeral_public_key,
-        load_cert_enabled=load_cert_enabled,
+        reader_certificate=reader_certificate,
         key_size=key_size,
     )
 
@@ -1018,7 +999,7 @@ def read_aliro(
     preferred_versions: Collection[bytes] = None,
     flow=AliroFlow.FAST,
     authentication_policy: AuthenticationPolicy = AuthenticationPolicy.USER_DEVICE_SETTING,
-    load_cert_enabled: bool = False,
+    reader_certificate: bytes | None = None,
     # Generated at random if not provided
     reader_ephemeral_private_key: bytes | None = None,
     # Generated at random if not provided
@@ -1070,7 +1051,7 @@ def read_aliro(
         transaction_identifier=transaction_identifier or os.urandom(16),
         command_parameters=command_parameters,
         authentication_policy=authentication_policy,
-        load_cert_enabled=load_cert_enabled,
+        reader_certificate=reader_certificate,
         interface=interface,
         endpoints=endpoints,
         key_size=key_size,

@@ -81,7 +81,11 @@ ls /dev/tty.*
   - `secure` -> `USER_DEVICE_SETTING_SECURE_ACTION` (0x02),
   - `force` -> `FORCE_USER_AUTHENTICATION` (0x03),
   defaults to `user`;
-- `load_cert`: enable sending `LOAD CERT` (`INS=0xD1`) before `AUTH1` when transaction goes through Standard/Step-up path. A profile0000 cert is generated per authentication attempt with a generated intermediate subject key; the cert is signed by `reader_private_key`, and AUTH1 is signed by the generated intermediate private key;
+- `reader_certificate`: optional `LOAD CERT` source used before `AUTH1` when transaction goes through Standard/Step-up path:
+  - `false` / omitted: do not send `LOAD CERT`;
+  - `true`: generate a profile0000 certificate once at startup from `reader_private_key` using a generated intermediate subject key; active `reader_private_key` is then replaced with that intermediate private key for authentication;
+  - `string`: profile0000 certificate bytes encoded as hex or base64;
+  configured certificates are validated locally for profile format, and subject key is checked against `reader_private_key`;
 - `reader_private_key`: reader private key as hex;
 - `reader_group_identifier`: group identifier as hex;
 - `reader_group_sub_identifier`: reader group sub-identifier as hex.
