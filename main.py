@@ -68,6 +68,7 @@ def read_aliro_once(  # noqa: C901
     express: bool,
     flow: AliroFlow,
     authentication_policy: AuthenticationPolicy,
+    load_cert_enabled: bool,
     throttle_polling: float,
     should_run,
 ):
@@ -112,6 +113,7 @@ def read_aliro_once(  # noqa: C901
             preferred_versions=[b"\x00\x09"],  # b"\x01\x00",
             flow=flow,
             authentication_policy=authentication_policy,
+            load_cert_enabled=load_cert_enabled,
             reader_group_identifier=repository.get_reader_group_identifier(),
             reader_group_sub_identifier=repository.get_reader_group_sub_identifier(),
             reader_private_key=repository.get_reader_private_key(),
@@ -144,6 +146,7 @@ def run_aliro(
     express: bool,
     flow: AliroFlow,
     authentication_policy: AuthenticationPolicy,
+    load_cert_enabled: bool,
     throttle_polling: float,
     should_run,
 ):
@@ -163,6 +166,7 @@ def run_aliro(
             express=express,
             flow=flow,
             authentication_policy=authentication_policy,
+            load_cert_enabled=load_cert_enabled,
             throttle_polling=throttle_polling,
             should_run=should_run,
         )
@@ -182,6 +186,7 @@ def main():
         flow = AliroFlow.FAST
         logging.warning(f"Digital Key flow {configured_flow} is not supported. Falling back to {flow}")
     authentication_policy = AuthenticationPolicy.parse(config["aliro"].get("authentication_policy", "user"))
+    load_cert_enabled = bool(config["aliro"].get("load_cert", False))
     throttle_polling = float(config["nfc"].get("throttle_polling") or 0.15)
 
     running = True
@@ -204,6 +209,7 @@ def main():
             express=express,
             flow=flow,
             authentication_policy=authentication_policy,
+            load_cert_enabled=load_cert_enabled,
             throttle_polling=throttle_polling,
             should_run=should_run,
         )

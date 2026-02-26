@@ -28,6 +28,7 @@ from util.structable import chunked, to_bytes
 from util.tlv.ber import BerTLV, BerTLVMessage
 
 from .authentication_policy import AuthenticationPolicy
+from .certificate import generate_profile0000_certificate, verify_profile1000_certificate
 from .flow import AliroFlow
 from .interface import Interface
 from .reader_status import ReaderStatus
@@ -415,6 +416,40 @@ def fast_auth(
     return endpoint_ephemeral_public_key, matched_endpoint, matched_secure
 
 
+def load_cert(tag: ISO7816Tag, reader_cert: bytes):
+    command = ISO7816Command(
+        cla=0x80,
+        ins=0xD1,
+        p1=0x00,
+        p2=0x00,
+        data=reader_cert,
+        le=None,
+    )
+    logging.info(f"LOAD_CERT CMD = {command}")
+    response = tag.transceive(command)
+    logging.info(f"LOAD_CERT RESPONSE: {response}")
+
+    response_data = bytearray(response.data)
+    while response.sw1 == 0x61:
+        get_response_command = ISO7816Command(
+            cla=command.cla,
+            ins=ISO7816Instruction.GET_RESPONSE,
+            p1=0x00,
+            p2=0x00,
+            data=None,
+            le=response.sw2,
+        )
+        logging.info(f"LOAD_CERT GET_RESPONSE COMMAND {get_response_command}")
+        response = tag.transceive(get_response_command)
+        logging.info(f"LOAD_CERT GET_RESPONSE RESPONSE {response}")
+        response_data.extend(response.data)
+
+    response = ISO7816Response(sw1=response.sw1, sw2=response.sw2, data=response_data)
+    logging.info(f"LOAD_CERT FULL RESPONSE: {response}")
+    if response.sw != (0x90, 0x00):
+        raise ProtocolError(f"LOAD_CERT INVALID STATUS {response.sw}")
+
+
 def standard_auth(  # noqa: C901
     tag: ISO7816Tag,
     fci_proprietary_template: List[bytes],
@@ -429,6 +464,7 @@ def standard_auth(  # noqa: C901
     transaction_identifier: bytes,
     endpoint_ephemeral_public_key: ec.EllipticCurvePublicKey,
     endpoints: List[Endpoint],
+    load_cert_enabled=False,
     key_size=16,
 ) -> Tuple[bytes | None, Endpoint | None, AliroSecureContext | None]:
     reader_ephemeral_public_key = reader_ephemeral_private_key.public_key()
@@ -445,13 +481,40 @@ def standard_auth(  # noqa: C901
     ]
     authentication_hash_input = to_bytes(authentication_hash_input_material)
     logging.info(f"authentication_hash_input={authentication_hash_input.hex()}")
+    auth_signing_private_key = reader_private_key
+    auth_signing_key_source = "reader_private_key"
 
-    signature = reader_private_key.sign(authentication_hash_input, ec.ECDSA(hashes.SHA256()))
+    if load_cert_enabled:
+        intermediate_reader_private_key = ec.generate_private_key(ec.SECP256R1())
+        reader_cert = generate_profile0000_certificate(
+            issuer_private_key=reader_private_key,
+            subject_public_key=intermediate_reader_private_key.public_key(),
+        )
+        try:
+            verify_profile1000_certificate(
+                reader_cert=reader_cert,
+                issuer_public_key=reader_private_key.public_key(),
+                subject_public_key=intermediate_reader_private_key.public_key(),
+            )
+        except ValueError as exc:
+            raise ProtocolError(str(exc)) from exc
+        auth_signing_private_key = intermediate_reader_private_key
+        auth_signing_key_source = "generated_intermediate_private_key"
+        logging.info(
+            "LOAD_CERT enabled, generated profile0000 with intermediate key and verified locally on-the-fly (%d bytes)",
+            len(reader_cert),
+        )
+        load_cert(tag, reader_cert)
+
+    signature = auth_signing_private_key.sign(authentication_hash_input, ec.ECDSA(hashes.SHA256()))
     logging.info(f"signature={signature.hex()} ({hex(len(signature))})")
     x, y = decode_dss_signature(signature)
     signature_point_form = bytes([*x.to_bytes(32, "big"), *y.to_bytes(32, "big")])
     logging.info(f"signature_point_form={signature_point_form.hex()} ({hex(len(signature_point_form))})")
-    logging.info(f"command_parameters={command_parameters} authentication_policy={authentication_policy}")
+    logging.info(
+        f"command_parameters={command_parameters} authentication_policy={authentication_policy}"
+        f" auth_signing_key_source={auth_signing_key_source}"
+    )
 
     data = BerTLVMessage(
         [
@@ -692,12 +755,8 @@ def exchange_step_up_documents(tag: ISO7816Tag, channel: AliroSecureChannel):
                                     # Name spaces
                                     "1": {
                                         "aliro-a": {
-                                            "test_id": False,
-                                            "credentialId": True,
-                                        },
-                                        "matter1": {
-                                            "test_id": False,
-                                            "credentialId": True,
+                                            "element2": True,
+                                            "element4": True,
                                         },
                                     },
                                     # Document type
@@ -871,6 +930,7 @@ def perform_authentication_flow(
     transaction_identifier: bytes,
     command_parameters: int,
     authentication_policy: AuthenticationPolicy,
+    load_cert_enabled: bool,
     interface: Interface,
     endpoints: List[Endpoint],
     key_size=16,
@@ -917,6 +977,7 @@ def perform_authentication_flow(
         reader_ephemeral_private_key=reader_ephemeral_private_key,
         endpoints=endpoints,
         endpoint_ephemeral_public_key=endpoint_ephemeral_public_key,
+        load_cert_enabled=load_cert_enabled,
         key_size=key_size,
     )
 
@@ -957,6 +1018,7 @@ def read_aliro(
     preferred_versions: Collection[bytes] = None,
     flow=AliroFlow.FAST,
     authentication_policy: AuthenticationPolicy = AuthenticationPolicy.USER_DEVICE_SETTING,
+    load_cert_enabled: bool = False,
     # Generated at random if not provided
     reader_ephemeral_private_key: bytes | None = None,
     # Generated at random if not provided
@@ -1008,6 +1070,7 @@ def read_aliro(
         transaction_identifier=transaction_identifier or os.urandom(16),
         command_parameters=command_parameters,
         authentication_policy=authentication_policy,
+        load_cert_enabled=load_cert_enabled,
         interface=interface,
         endpoints=endpoints,
         key_size=key_size,
