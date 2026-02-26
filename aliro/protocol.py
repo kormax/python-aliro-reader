@@ -130,13 +130,6 @@ class AliroSecureChannel:
             self.counter_endpoint,
         )
 
-    def encrypt_response(self, response: ISO7816Response) -> Tuple[ISO7816Response, int]:
-        ciphertext = self.encrypt_endpoint_data(response.data)
-        return (
-            ISO7816Response(sw1=response.sw1, sw2=response.sw2, data=ciphertext),
-            self.counter_endpoint,
-        )
-
     def encrypt_envelope_command_data(self, message: bytes):
         return cbor2.dumps({"data": self.encrypt_reader_data(message)})
 
@@ -161,26 +154,6 @@ class AliroSecureChannel:
             ),
             self.counter_reader,
         )
-
-    def transceive_plain_secure(self, tag: ISO7816Tag, command: ISO7816Command) -> ISO7816Response:
-        """Sends a plain command and expects a secure response"""
-        decrypted_response, _ = self.decrypt_response(tag.transceive(command))
-        return decrypted_response
-
-    def transceive_secure_secure(self, tag: ISO7816Tag, command: ISO7816Command) -> ISO7816Response:
-        """Sends a secure command and expects a secure response"""
-        encrypted_command, _ = self.encrypt_command(command)
-
-        encrypted_response = tag.transceive(encrypted_command)
-        decrypted_response, _ = self.decrypt_response(encrypted_response)
-        return decrypted_response
-
-    def transceive_plain_plain(self, tag: ISO7816Tag, command: ISO7816Command) -> ISO7816Response:
-        """Sends a plain command and expects a plain response"""
-        return tag.transceive(command)
-
-    def transceive(self, tag: ISO7816Tag, command: ISO7816Command) -> ISO7816Response:
-        return self.transceive_secure_secure(tag, command)
 
 
 class AliroSecureContext:
@@ -250,6 +223,10 @@ def find_endpoint_by_key_slot(endpoints: List[Endpoint], key_slot):
     return next((e for e in endpoints if e.key_slot == key_slot), None)
 
 
+def find_endpoint_by_public_key(endpoints: List[Endpoint], public_key: bytes):
+    return next((e for e in endpoints if e.public_key == public_key), None)
+
+
 def generate_ec_key_if_provided_is_none(
     private_key: ec.EllipticCurvePrivateKey | None,
 ):
@@ -297,9 +274,26 @@ def fast_auth(
     command = ISO7816Command(cla=0x80, ins=0x80, p1=0x00, p2=0x00, data=command_data, le=None)
     logging.info(f"AUTH0 CMD = {command}")
     response = tag.transceive(command)
+    logging.info(f"AUTH0 RESPONSE: {response}")
+    response_data = bytearray(response.data)
+    while response.sw1 == 0x61:
+        get_response_command = ISO7816Command(
+            cla=command.cla,
+            ins=ISO7816Instruction.GET_RESPONSE,
+            p1=0x00,
+            p2=0x00,
+            data=None,
+            le=response.sw2,
+        )
+        logging.info(f"AUTH0 GET_RESPONSE COMMAND {get_response_command}")
+        response = tag.transceive(get_response_command)
+        logging.info(f"AUTH0 GET_RESPONSE RESPONSE {response}")
+        response_data.extend(response.data)
+
+    response = ISO7816Response(sw1=response.sw1, sw2=response.sw2, data=response_data)
+    logging.info(f"AUTH0 FULL RESPONSE: {response}")
     if response.sw != (0x90, 0x00):
         raise ProtocolError(f"AUTH0 INVALID STATUS {response.sw}")
-    logging.info(f"AUTH0 RES = {response}")
     message = BerTLVMessage.from_bytes(response.data)
 
     endpoint_ephemeral_public_key = message.find_by_tag_else_empty(0x86).value
@@ -470,6 +464,23 @@ def standard_auth(  # noqa: C901
     logging.info(f"AUTH1 COMMAND {command}")
     response = tag.transceive(command)
     logging.info(f"AUTH1 RESPONSE: {response}")
+    response_data = bytearray(response.data)
+    while response.sw1 == 0x61:
+        get_response_command = ISO7816Command(
+            cla=command.cla,
+            ins=ISO7816Instruction.GET_RESPONSE,
+            p1=0x00,
+            p2=0x00,
+            data=None,
+            le=response.sw2,
+        )
+        logging.info(f"AUTH1 GET_RESPONSE COMMAND {get_response_command}")
+        response = tag.transceive(get_response_command)
+        logging.info(f"AUTH1 GET_RESPONSE RESPONSE {response}")
+        response_data.extend(response.data)
+
+    response = ISO7816Response(sw1=response.sw1, sw2=response.sw2, data=response_data)
+    logging.info(f"AUTH1 FULL RESPONSE: {response}")
     if response.sw != (0x90, 0x00):
         raise ProtocolError(f"AUTH1 INVALID STATUS {response.sw}")
 
@@ -588,10 +599,13 @@ def standard_auth(  # noqa: C901
         endpoint = find_endpoint_by_key_slot(endpoints, key_slot)
         if endpoint is not None:
             endpoint_public_key = load_ec_public_key_from_bytes(endpoint.public_key)
+    elif device_public_key is not None:
+        endpoint = find_endpoint_by_public_key(endpoints, device_public_key)
+        if endpoint is not None:
+            endpoint_public_key = load_ec_public_key_from_bytes(endpoint.public_key)
 
     logging.info(
         "AUTH1 response"
-        f" signaling={auth_status.hex() if auth_status else None}"
         f" signaling_bitmask={signaling_bitmask!r}"
         f" credential_signed_timestamp={credential_signed_timestamp},"
         f" revocation_signed_timestamp={revocation_signed_timestamp},"
@@ -707,17 +721,17 @@ def exchange_step_up_documents(tag: ISO7816Tag, channel: AliroSecureChannel):
         data=BerTLV(0x53, device_request),
     )
     logging.info(f"ENVELOPE2 CMD = {command}")
-    response = channel.transceive_plain_plain(tag, command)
+    response = tag.transceive(command)
     logging.info(f"ENVELOPE2 RES = {response}")
 
     data = response.data
 
     while response.sw1 == 0x61:
         command = ISO7816Command(
-            cla=0x00, ins=ISO7816Instruction.GET_RESPONSE, p1=0x00, p2=0x00, data=None, le=response.sw2
+            cla=command.cla, ins=ISO7816Instruction.GET_RESPONSE, p1=0x00, p2=0x00, data=None, le=response.sw2
         )
         logging.info(f"GET DATA CMD = {command}")
-        response = channel.transceive_plain_plain(tag, command)
+        response = tag.transceive(command)
         logging.info(f"GET DATA RES = {response}")
         data += response.data
 
@@ -765,7 +779,7 @@ def exchange(
     response_data = bytearray(response.data)
     while response.sw1 == 0x61 and skip_chaining is False:
         get_response_command = ISO7816Command(
-            cla=0x80,
+            cla=command.cla,
             ins=ISO7816Instruction.GET_RESPONSE,
             p1=0x00,
             p2=0x00,
