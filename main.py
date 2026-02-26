@@ -5,12 +5,12 @@ import sys
 import time
 
 from aliro.authentication_policy import AuthenticationPolicy
-from aliro.protocol import AliroFlow, ProtocolError, read_aliro
+from aliro.flow import AliroFlow
+from aliro.protocol import ProtocolError, read_aliro
 from repository import Repository
 from util.afclf import AnnotationFrameContactlessFrontend, ISODEPTag, RemoteTarget, activate
 from util.ecp import ECP
 from util.iso7816 import ISO7816Tag
-from util.tlv.ber import BerTLV, BerTLVMessage
 
 # By default, this file is located in the same folder as the project
 CONFIGURATION_FILE_PATH = "configuration.json"
@@ -61,15 +61,6 @@ def configure_repository(config: dict, repository=None):
     return repository
 
 
-def resolve_flow(flow: str) -> AliroFlow:
-    try:
-        return AliroFlow[str(flow).upper()]
-    except KeyError:
-        fallback_flow = AliroFlow.FAST
-        logging.warning(f"Digital Key flow {flow} is not supported. Falling back to {fallback_flow}")
-        return fallback_flow
-
-
 def read_aliro_once(  # noqa: C901
     nfc_device,
     repository: Repository,
@@ -114,18 +105,6 @@ def read_aliro_once(  # noqa: C901
 
     tag = ISO7816Tag(target)
 
-    command = BerTLV(
-        0xBA,
-        BerTLVMessage(
-            [
-                # Session indicator
-                BerTLV(0x8C, [0x00]),
-                # Read request, offset 0, length 16
-                BerTLV(0x87, [0x00, 0x00, 0x00, 0x0F]),
-            ]
-        ),
-    )
-
     try:
         result_flow, endpoint = read_aliro(
             tag,
@@ -137,7 +116,6 @@ def read_aliro_once(  # noqa: C901
             reader_group_sub_identifier=repository.get_reader_group_sub_identifier(),
             reader_private_key=repository.get_reader_private_key(),
             key_size=16,
-            mailbox_data=command,
         )
 
         if endpoint is not None:
@@ -197,7 +175,12 @@ def main():
     nfc_device = configure_nfc_device(config["nfc"])
     repository = configure_repository(config["aliro"])
     express = bool(config["aliro"].get("express", True))
-    flow = resolve_flow(config["aliro"].get("flow", "fast"))
+    configured_flow = config["aliro"].get("flow", "fast")
+    try:
+        flow = AliroFlow.parse(configured_flow)
+    except (KeyError, ValueError):
+        flow = AliroFlow.FAST
+        logging.warning(f"Digital Key flow {configured_flow} is not supported. Falling back to {flow}")
     authentication_policy = AuthenticationPolicy.parse(config["aliro"].get("authentication_policy", "user"))
     throttle_polling = float(config["nfc"].get("throttle_polling") or 0.15)
 

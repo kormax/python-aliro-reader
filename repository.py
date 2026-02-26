@@ -17,8 +17,8 @@ class Repository:
     def __init__(self, storage_file_path):
         self.storage_file_path = storage_file_path
         self._reader_private_key = bytes.fromhex("00" * 32)
-        self._reader_group_sub_identifier = bytes.fromhex("00" * 8)
-        self._reader_group_identifier = bytes.fromhex("00" * 8)
+        self._reader_group_sub_identifier = bytes.fromhex("00" * 16)
+        self._reader_group_identifier = bytes.fromhex("00" * 16)
         self._endpoints = []
         self._transaction_lock = Lock()
         self._state_lock = Lock()

@@ -43,7 +43,7 @@ def decrypt_aes_gcm(key: bytes, iv: bytes, ciphertext: bytes):
 def encrypt_aes_gcm(key: bytes, iv: bytes, plaintext: bytes):
     assert len(iv) == 12, "IV must be 12 bytes for GCM mode"
     encryptor = Cipher(algorithms.AES(key), modes.GCM(iv)).encryptor()
-    return encryptor.update(plaintext) + encryptor.finalize() + encryptor.tag
+    return encryptor.update(to_bytes(plaintext)) + encryptor.finalize() + encryptor.tag
 
 
 def hkdf_sha256(ikm: bytes, salt: bytes | Packable | list, info: bytes | Packable | list, length: int) -> bytes:

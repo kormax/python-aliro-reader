@@ -24,7 +24,7 @@ This project provides a Python-based implementation of the NFC part of the Aliro
 
 - **A way to procure valid credentials/reader configuration material externally (not provided by this project at this moment)**;
 - Linux or macOS;
-- Python 3.9+;
+- Python 3.10+;
 - PN532 connected over UART or USB (recommended/tested path);
 
 For PC usage with PN532 via UART connect as follows:
@@ -72,7 +72,10 @@ ls /dev/tty.*
 ### `aliro`
 
 - `persist`: path to JSON state file used by repository storage;
-- `flow`: preferred minimum authentication flow (`fast`, `standard`, `attestation`);
+- `flow`: preferred minimum authentication flow. Supported values:
+  - `expedited` / `fast` -> `FAST`,
+  - `standard` -> `STANDARD`,
+  - `attestation` / `step_up` / `stepup` -> `STEP_UP`;
 - `authentication_policy`: user authentication policy string; supported values:
   - `user_device_setting` / `user` / `original` / `express` -> `USER_DEVICE_SETTING` (0x01),
   - `secure` -> `USER_DEVICE_SETTING_SECURE_ACTION` (0x02),

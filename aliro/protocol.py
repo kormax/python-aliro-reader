@@ -28,7 +28,9 @@ from util.structable import chunked, to_bytes
 from util.tlv.ber import BerTLV, BerTLVMessage
 
 from .authentication_policy import AuthenticationPolicy
+from .flow import AliroFlow
 from .interface import Interface
+from .reader_status import ReaderStatus
 from .signaling_bitmask import SignalingBitmask
 
 PERSISTENT_ASTR = "Persistent**"
@@ -45,6 +47,7 @@ AUTH0_FAST_GCM_IV = b"\x00" * 12
 
 READER_MODE = bytes.fromhex("0000000000000000")
 ENDPOINT_MODE = bytes.fromhex("0000000000000001")
+AUTH1_COMMAND_PARAMETERS_REQUEST_PUBLIC_KEY = 0x01
 
 
 def _key_hex(value):
@@ -56,12 +59,6 @@ def _key_hex(value):
 class AliroTransactionFlags(IntEnum):
     STANDARD = 0x00
     FAST = 0x01
-
-
-class AliroFlow(IntEnum):
-    FAST = 0x00
-    STANDARD = 0x01
-    ATTESTATION = 0x02
 
 
 class AliroSecureChannel:
@@ -268,7 +265,7 @@ def fast_auth(
     fci_proprietary_template: List[bytes],
     protocol_version: bytes,
     interface: Interface,
-    transaction_flags: int,
+    command_parameters: int,
     authentication_policy: AuthenticationPolicy,
     reader_group_identifier: bytes,
     reader_group_sub_identifier: bytes,
@@ -288,7 +285,7 @@ def fast_auth(
 
     command_data = BerTLVMessage(
         [
-            BerTLV(0x41, value=transaction_flags),
+            BerTLV(0x41, value=command_parameters),
             BerTLV(0x42, value=authentication_policy),
             BerTLV(0x5C, value=protocol_version),
             BerTLV(0x87, value=reader_ephemeral_public_key_bytes),
@@ -342,7 +339,7 @@ def fast_auth(
             BerTLV(0x5C, value=protocol_version),
             reader_ephemeral_public_key_x,
             transaction_identifier,
-            [transaction_flags, authentication_policy],
+            [command_parameters, authentication_policy],
             fci_proprietary_bytes,
             endpoint_public_key_x,
         ]
@@ -429,7 +426,7 @@ def standard_auth(  # noqa: C901
     fci_proprietary_template: List[bytes],
     protocol_version: bytes,
     interface: Interface,
-    transaction_flags: int,
+    command_parameters: int,
     authentication_policy: AuthenticationPolicy,
     reader_group_identifier: bytes,
     reader_group_sub_identifier: bytes,
@@ -460,11 +457,11 @@ def standard_auth(  # noqa: C901
     x, y = decode_dss_signature(signature)
     signature_point_form = bytes([*x.to_bytes(32, "big"), *y.to_bytes(32, "big")])
     logging.info(f"signature_point_form={signature_point_form.hex()} ({hex(len(signature_point_form))})")
-    logging.info(f"transaction_flags={transaction_flags} authentication_policy={authentication_policy}")
+    logging.info(f"command_parameters={command_parameters} authentication_policy={authentication_policy}")
 
     data = BerTLVMessage(
         [
-            BerTLV(0x41, value=transaction_flags),
+            BerTLV(0x41, value=AUTH1_COMMAND_PARAMETERS_REQUEST_PUBLIC_KEY),
             BerTLV(0x9E, value=signature_point_form),
         ]
     )
@@ -500,7 +497,7 @@ def standard_auth(  # noqa: C901
             BerTLV(0x5C, value=protocol_version),
             reader_ephemeral_public_key_x,
             transaction_identifier,
-            [transaction_flags, authentication_policy],
+            [command_parameters, authentication_policy],
             fci_proprietary_template,
         ]
     )
@@ -632,7 +629,7 @@ def standard_auth(  # noqa: C901
         BerTLV(0x5C, value=protocol_version),
         reader_ephemeral_public_key_x,
         transaction_identifier,
-        [transaction_flags, authentication_policy],
+        [command_parameters, authentication_policy],
         fci_proprietary_bytes,
         endpoint_public_key_x,
     ]
@@ -663,9 +660,7 @@ def standard_auth(  # noqa: C901
     return k_persistent, endpoint, secure
 
 
-def exchange_attestation(tag: ISO7816Tag, channel: AliroSecureChannel):
-    """Performs attestation exchange, returns attestation package"""
-
+def exchange_step_up_documents(tag: ISO7816Tag, channel: AliroSecureChannel):
     device_request = channel.encrypt_envelope_command_data(
         cbor2.dumps(
             # Device request entry
@@ -746,25 +741,49 @@ def exchange_attestation(tag: ISO7816Tag, channel: AliroSecureChannel):
     return cbor_plaintext
 
 
-def mailbox_exchange(tag: ISO7816Tag, channel: AliroSecureChannel, data: bytes):
-    logging.info(f"EXCHANGE DATA {data}")
-
+def exchange(
+    tag: ISO7816Tag,
+    channel: AliroSecureChannel,
+    tlvs: bytes | BerTLV | BerTLVMessage | List[BerTLV] = b"",
+    *,
+    skip_chaining=False,
+) -> ISO7816Response:
     command = ISO7816Command(
         cla=0x80,
         ins=0xC9,
         p1=0x00,
         p2=0x00,
-        data=to_bytes(data),
+        data=to_bytes(tlvs),
     )
     logging.info(f"EXCHANGE COMMAND {command}")
 
-    response = channel.transceive_secure_secure(tag, command)
+    encrypted_command, _ = channel.encrypt_command(command)
+    logging.info(f"EXCHANGE ENCRYPTED COMMAND {encrypted_command}")
+    response = tag.transceive(encrypted_command)
+    logging.info(f"EXCHANGE ENCRYPTED RESPONSE {response} {skip_chaining}")
 
-    logging.info(f"EXCHANGE RESPONSE {response}")
-    if response.sw1 != 0x90:
-        return []
+    response_data = bytearray(response.data)
+    while response.sw1 == 0x61 and skip_chaining is False:
+        get_response_command = ISO7816Command(
+            cla=0x80,
+            ins=ISO7816Instruction.GET_RESPONSE,
+            p1=0x00,
+            p2=0x00,
+            data=None,
+            le=response.sw2,
+        )
+        logging.info(f"EXCHANGE GET_RESPONSE COMMAND {get_response_command}")
+        response = tag.transceive(get_response_command)
+        logging.info(f"EXCHANGE GET_RESPONSE RESPONSE {response}")
+        response_data.extend(response.data)
 
-    return response.data
+    response = ISO7816Response(sw1=response.sw1, sw2=response.sw2, data=response_data)
+    if response.sw != (0x90, 0x00):
+        return response
+
+    response, _ = channel.decrypt_response(response)
+    logging.info(f"EXCHANGE DECRYPTED RESPONSE {response}")
+    return response
 
 
 def select_applet(tag: ISO7816Tag, applet=ISO7816Application.ALIRO):
@@ -777,11 +796,18 @@ def select_applet(tag: ISO7816Tag, applet=ISO7816Application.ALIRO):
     return response.data
 
 
-def control_flow(tag: ISO7816Tag, transaction_flags=0x00, transaction_code=0x01):
+def control_flow(
+    tag: ISO7816Tag,
+    status: ReaderStatus = ReaderStatus.FAILURE_NO_INFORMATION,
+):
+    if status not in ReaderStatus.op_control_flow_allowed():
+        raise ValueError(f"Unsupported OP_CONTROL_FLOW status: {status}")
+
+    s1_parameter, s2_parameter = status.value
     command_data = BerTLVMessage(
         [
-            BerTLV(0x41, value=transaction_flags),
-            BerTLV(0x42, value=transaction_code),
+            BerTLV(0x41, value=s1_parameter),
+            BerTLV(0x42, value=s2_parameter),
         ]
     )
 
@@ -791,6 +817,31 @@ def control_flow(tag: ISO7816Tag, transaction_flags=0x00, transaction_code=0x01)
     logging.info(f"OP_CONTROL_FLOW RES = {response}")
     if response.sw != (0x90, 0x00):
         raise ProtocolError(f"OP_CONTROL_FLOW INVALID STATUS {response.sw}")
+    return response.data
+
+
+def complete_transaction(
+    tag: ISO7816Tag,
+    secure: AliroSecureChannel | None,
+    reader_status: ReaderStatus = ReaderStatus.STATE_UNSECURE,
+):
+    # Per spec, completion should be sent via EXCHANGE (0x97) when secure channel exists;
+    # otherwise use CONTROL FLOW to indicate failure.
+    if secure is None:
+        logging.info("Secure channel unavailable, sending CONTROL FLOW failure indication")
+        return control_flow(tag)
+
+    # IOS implementation hangs after EXCHANGE of status, and there is no chaining,
+    # so we set skip_chaining to True to force a GET RESPONSE and avoid the hang
+    response = exchange(
+        tag,
+        secure,
+        BerTLV(0x97, value=reader_status),
+        skip_chaining=True,
+    )
+    if response.sw1 not in (0x90, 0x61):
+        logging.info("Reader status EXCHANGE failed, sending CONTROL FLOW failure indication")
+        return control_flow(tag)
     return response.data
 
 
@@ -804,16 +855,14 @@ def perform_authentication_flow(
     protocol_version: bytes,
     fci_proprietary_template: List[bytes],
     transaction_identifier: bytes,
-    transaction_flags: int,
+    command_parameters: int,
     authentication_policy: AuthenticationPolicy,
     interface: Interface,
     endpoints: List[Endpoint],
-    mailbox_data=b"",
     key_size=16,
 ) -> Tuple[AliroFlow, Endpoint | None]:
     """Returns an Endpoint if one was found and successfully authenticated."""
     reader_public_key = reader_private_key.public_key()
-    reader_public_key_x, reader_public_key_y = get_ec_key_public_points(reader_public_key)
 
     reader_ephemeral_public_key = reader_ephemeral_private_key.public_key()
     endpoint_ephemeral_public_key, endpoint, secure = fast_auth(
@@ -821,7 +870,7 @@ def perform_authentication_flow(
         fci_proprietary_template=fci_proprietary_template,
         protocol_version=protocol_version,
         interface=interface,
-        transaction_flags=transaction_flags,
+        command_parameters=command_parameters,
         authentication_policy=authentication_policy,
         reader_group_identifier=reader_group_identifier,
         reader_group_sub_identifier=reader_group_sub_identifier,
@@ -833,15 +882,11 @@ def perform_authentication_flow(
     )
 
     if endpoint is not None and flow == AliroFlow.FAST:
-        if secure is not None:
-            _ = mailbox_exchange(
-                tag,
-                secure.exchange,
-                data=mailbox_data,
-            )
-            pass
-
-        _ = control_flow(tag, 0x01, 0x01)
+        _ = complete_transaction(
+            tag,
+            secure.exchange if secure is not None else None,
+            reader_status=ReaderStatus.STATE_UNSECURE,
+        )
         return AliroFlow.FAST, endpoint
 
     k_persistent, endpoint, secure = standard_auth(
@@ -849,7 +894,7 @@ def perform_authentication_flow(
         fci_proprietary_template=fci_proprietary_template,
         protocol_version=protocol_version,
         interface=interface,
-        transaction_flags=transaction_flags,
+        command_parameters=command_parameters,
         authentication_policy=authentication_policy,
         transaction_identifier=transaction_identifier,
         reader_group_identifier=reader_group_identifier,
@@ -864,22 +909,29 @@ def perform_authentication_flow(
     if endpoint is not None and k_persistent is not None:
         endpoint.persistent_key = k_persistent
 
-    # if endpoint is None:
-    #    return AliroFlow.STANDARD, None, None
+    if secure is None or secure.exchange is None or (endpoint is not None and flow == AliroFlow.STANDARD):
+        _ = complete_transaction(
+            tag,
+            secure.exchange if secure is not None else None,
+            reader_status=ReaderStatus.STATE_UNSECURE,
+        )
+        return AliroFlow.STANDARD, endpoint
 
-    _ = mailbox_exchange(
+    if endpoint.last_signaling_bitmask is None or (
+        endpoint.last_signaling_bitmask & SignalingBitmask.STEP_UP_SELECT_REQUIRED_FOR_DOC_RETRIEVAL
+    ):
+        _ = select_applet(tag, applet=ISO7816Application.ALIRO_STEP_UP)
+
+    if secure.step_up is not None:
+        _ = exchange_step_up_documents(tag, secure.step_up)
+
+    _ = complete_transaction(
         tag,
-        secure.exchange,
-        data=mailbox_data,
+        secure.step_up if secure is not None else None,
+        reader_status=ReaderStatus.STATE_UNSECURE,
     )
 
-    _ = select_applet(tag, applet=ISO7816Application.ALIRO_STEP_UP)
-
-    _ = exchange_attestation(tag, secure.step_up)
-
-    _ = control_flow(tag, 0x01, 0x01)
-
-    return AliroFlow.ATTESTATION, endpoint
+    return AliroFlow.STEP_UP, endpoint
 
 
 def read_aliro(
@@ -897,10 +949,9 @@ def read_aliro(
     transaction_identifier: bytes | None = None,
     interface=Interface.NFC,
     key_size=16,
-    mailbox_data: bytes = b"",
 ) -> Tuple[AliroFlow, Endpoint | None]:
     """Returns the authentication flow used and an optional endpoint if authentication was successful."""
-    transaction_flags = sum({AliroTransactionFlags.FAST if flow <= AliroFlow.FAST else AliroTransactionFlags.STANDARD})
+    command_parameters = sum({AliroTransactionFlags.FAST if flow <= AliroFlow.FAST else AliroTransactionFlags.STANDARD})
 
     response = select_applet(tag, applet=ISO7816Application.ALIRO)
 
@@ -941,12 +992,11 @@ def read_aliro(
         protocol_version=protocol_version,
         fci_proprietary_template=BerTLV(0xA5, fci_proprietary_template),
         transaction_identifier=transaction_identifier or os.urandom(16),
-        transaction_flags=transaction_flags,
+        command_parameters=command_parameters,
         authentication_policy=authentication_policy,
         interface=interface,
         endpoints=endpoints,
         key_size=key_size,
-        mailbox_data=mailbox_data,
     )
     if endpoint is not None:
         endpoint.last_used_at = int(time.time())
