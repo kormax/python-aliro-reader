@@ -27,6 +27,7 @@ from util.iso7816 import ISO7816, ISO7816Application, ISO7816Command, ISO7816Ins
 from util.structable import chunked, to_bytes
 from util.tlv.ber import BerTLV, BerTLVMessage
 
+from .auth1_command_parameters import Auth1CommandParameters
 from .authentication_policy import AuthenticationPolicy
 from .flow import AliroFlow
 from .interface import Interface
@@ -47,7 +48,6 @@ AUTH0_FAST_GCM_IV = b"\x00" * 12
 
 READER_MODE = bytes.fromhex("0000000000000000")
 ENDPOINT_MODE = bytes.fromhex("0000000000000001")
-AUTH1_COMMAND_PARAMETERS_REQUEST_PUBLIC_KEY = 0x01
 
 
 def _key_hex(value):
@@ -237,7 +237,7 @@ def generate_ec_key_if_provided_is_none(
     )
 
 
-def fast_auth(
+def fast_auth(  # noqa: C901
     tag: ISO7816Tag,
     fci_proprietary_template: List[bytes],
     protocol_version: bytes,
@@ -299,11 +299,23 @@ def fast_auth(
     endpoint_ephemeral_public_key = message.find_by_tag_else_empty(0x86).value
     if endpoint_ephemeral_public_key is None:
         raise ProtocolError("Response does not contain endpoint_ephemeral_public_key_tag 0x86")
+    if len(endpoint_ephemeral_public_key) != 65 or endpoint_ephemeral_public_key[0] != 0x04:
+        raise ProtocolError(
+            "Response contains invalid endpoint_ephemeral_public_key_tag 0x86"
+            f" length={len(endpoint_ephemeral_public_key)}"
+        )
 
     endpoint_ephemeral_public_key = load_ec_public_key_from_bytes(endpoint_ephemeral_public_key)
     endpoint_ephemeral_public_key_x, _ = get_ec_key_public_points(endpoint_ephemeral_public_key)
 
+    fast_requested = (command_parameters & int(AliroTransactionFlags.FAST)) != 0
     returned_cryptogram = message.find_by_tag_else_empty(0x9D).value
+    if returned_cryptogram is not None and len(returned_cryptogram) != 64:
+        raise ProtocolError(f"Response contains invalid cryptogram_tag 0x9D length={len(returned_cryptogram)}")
+    if not fast_requested and returned_cryptogram is not None:
+        raise ProtocolError("AUTH0 response contains cryptogram while expedited-fast was not requested")
+    if fast_requested and returned_cryptogram is None:
+        raise ProtocolError("AUTH0 response does not contain cryptogram while expedited-fast was requested")
     if returned_cryptogram is None:
         logging.info("AUTH0 skipped")
         return endpoint_ephemeral_public_key, None, None
@@ -497,9 +509,10 @@ def standard_auth(  # noqa: C901
         f" auth_signing_key_source={auth_signing_key_source}"
     )
 
+    auth1_command_parameters = Auth1CommandParameters.REQUEST_PUBLIC_KEY
     data = BerTLVMessage(
         [
-            BerTLV(0x41, value=AUTH1_COMMAND_PARAMETERS_REQUEST_PUBLIC_KEY),
+            BerTLV(0x41, value=auth1_command_parameters),
             BerTLV(0x9E, value=signature_point_form),
         ]
     )
@@ -625,20 +638,43 @@ def standard_auth(  # noqa: C901
     signature = tlv_array.find_by_tag_else_empty(0x9E).value
     if signature is None:
         raise ProtocolError("No device signature in response at tag 0x9E")
+    if len(signature) != 64:
+        raise ProtocolError(f"Invalid device signature length at tag 0x9E: {len(signature)}")
 
     credential_signed_timestamp = tlv_array.find_by_tag_else_empty(0x91).value
     revocation_signed_timestamp = tlv_array.find_by_tag_else_empty(0x92).value
     auth_status = tlv_array.find_by_tag_else_empty(0x5E).value
+    if auth_status is None:
+        raise ProtocolError("No signaling bitmap in response at tag 0x5E")
+    if len(auth_status) != 2:
+        raise ProtocolError(f"Invalid signaling bitmap length at tag 0x5E: {len(auth_status)}")
+    if credential_signed_timestamp is not None and len(credential_signed_timestamp) != 20:
+        raise ProtocolError(
+            f"Invalid credential_signed_timestamp length at tag 0x91: {len(credential_signed_timestamp)}"
+        )
+    if revocation_signed_timestamp is not None and len(revocation_signed_timestamp) != 20:
+        raise ProtocolError(
+            f"Invalid revocation_signed_timestamp length at tag 0x92: {len(revocation_signed_timestamp)}"
+        )
     signaling_bitmask = SignalingBitmask.parse(auth_status)
 
     endpoint = None
     endpoint_public_key = None
 
     device_public_key = tlv_array.find_by_tag_else_empty(0x5A).value
+    if device_public_key is not None and (len(device_public_key) != 65 or device_public_key[0] != 0x04):
+        raise ProtocolError(f"Invalid Access Credential public key length/format at tag 0x5A: {len(device_public_key)}")
     if device_public_key is not None:
         endpoint_public_key = load_ec_public_key_from_bytes(device_public_key)
 
     key_slot = tlv_array.find_by_tag_else_empty(0x4E).value
+    if key_slot is not None and len(key_slot) != 8:
+        raise ProtocolError(f"Invalid key_slot length at tag 0x4E: {len(key_slot)}")
+    key_slot_requested = auth1_command_parameters.key_slot_requested
+    if key_slot_requested and key_slot is None:
+        raise ProtocolError("AUTH1 response must contain key_slot (0x4E) when key slot was requested")
+    if key_slot is None and device_public_key is None:
+        raise ProtocolError("AUTH1 response must contain either key_slot (0x4E) or public key (0x5A)")
     if key_slot is not None:
         endpoint = find_endpoint_by_key_slot(endpoints, key_slot)
         if endpoint is not None:
@@ -965,7 +1001,16 @@ def perform_authentication_flow(
     if endpoint is not None and k_persistent is not None:
         endpoint.persistent_key = k_persistent
 
-    if secure is None or secure.exchange is None or (endpoint is not None and flow == AliroFlow.STANDARD):
+    if endpoint is None:
+        logging.info("AUTH1 did not resolve an endpoint; stopping before step-up and reporting reader failure status")
+        _ = complete_transaction(
+            tag,
+            secure.exchange if secure is not None else None,
+            reader_status=ReaderStatus.ACCESS_CREDENTIAL_PUBLIC_KEY_NOT_FOUND,
+        )
+        return AliroFlow.STANDARD, None
+
+    if secure is None or secure.exchange is None or flow == AliroFlow.STANDARD:
         _ = complete_transaction(
             tag,
             secure.exchange if secure is not None else None,

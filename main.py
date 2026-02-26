@@ -95,14 +95,21 @@ def configure_repository(config: dict, repository=None):
     if reader_private_key_hex:
         repository.set_reader_private_key(bytes.fromhex(reader_private_key_hex))
 
-    reader_group_identifier = bytes.fromhex(reader_group_identifier_hex) if reader_group_identifier_hex else bytes(8)
+    reader_group_identifier = bytes.fromhex(reader_group_identifier_hex) if reader_group_identifier_hex else bytes(16)
+    if len(reader_group_identifier) != 16:
+        raise ValueError(
+            f"aliro.reader_group_identifier must be 16 bytes (32 hex chars), got {len(reader_group_identifier)} bytes"
+        )
     repository.set_reader_group_identifier(reader_group_identifier)
 
     reader_group_sub_identifier = (
-        bytes.fromhex(reader_group_sub_identifier_hex)
-        if reader_group_sub_identifier_hex
-        else bytes(len(reader_group_identifier))
+        bytes.fromhex(reader_group_sub_identifier_hex) if reader_group_sub_identifier_hex else bytes(16)
     )
+    if len(reader_group_sub_identifier) != 16:
+        raise ValueError(
+            "aliro.reader_group_sub_identifier must be 16 bytes"
+            f" (32 hex chars), got {len(reader_group_sub_identifier)} bytes"
+        )
     repository.set_reader_group_sub_identifier(reader_group_sub_identifier)
     return repository
 
