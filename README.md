@@ -72,8 +72,12 @@ ls /dev/tty.*
 ### `aliro`
 
 - `persist`: path to JSON state file used by repository storage;
-- `express`: whether to advertise express-capable annotation behavior;
 - `flow`: preferred minimum authentication flow (`fast`, `standard`, `attestation`);
+- `authentication_policy`: user authentication policy string; supported values:
+  - `user_device_setting` / `user` / `original` / `express` -> `USER_DEVICE_SETTING` (0x01),
+  - `secure` -> `USER_DEVICE_SETTING_SECURE_ACTION` (0x02),
+  - `force` -> `FORCE_USER_AUTHENTICATION` (0x03),
+  defaults to `user`;
 - `reader_private_key`: reader private key as hex;
 - `reader_group_identifier`: group identifier as hex;
 - `reader_group_sub_identifier`: reader group sub-identifier as hex.

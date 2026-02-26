@@ -4,7 +4,8 @@ import signal
 import sys
 import time
 
-from aliro.protocol import AliroFlow, AliroTransactionType, ProtocolError, read_aliro
+from aliro.authentication_policy import AuthenticationPolicy
+from aliro.protocol import AliroFlow, ProtocolError, read_aliro
 from repository import Repository
 from util.afclf import AnnotationFrameContactlessFrontend, ISODEPTag, RemoteTarget, activate
 from util.ecp import ECP
@@ -75,6 +76,7 @@ def read_aliro_once(  # noqa: C901
     *,
     express: bool,
     flow: AliroFlow,
+    authentication_policy: AuthenticationPolicy,
     throttle_polling: float,
     should_run,
 ):
@@ -130,7 +132,7 @@ def read_aliro_once(  # noqa: C901
             endpoints=repository.get_all_endpoints(),
             preferred_versions=[b"\x00\x09"],  # b"\x01\x00",
             flow=flow,
-            transaction_code=AliroTransactionType.UNLOCK,
+            authentication_policy=authentication_policy,
             reader_group_identifier=repository.get_reader_group_identifier(),
             reader_group_sub_identifier=repository.get_reader_group_sub_identifier(),
             reader_private_key=repository.get_reader_private_key(),
@@ -163,6 +165,7 @@ def run_aliro(
     *,
     express: bool,
     flow: AliroFlow,
+    authentication_policy: AuthenticationPolicy,
     throttle_polling: float,
     should_run,
 ):
@@ -181,6 +184,7 @@ def run_aliro(
             repository,
             express=express,
             flow=flow,
+            authentication_policy=authentication_policy,
             throttle_polling=throttle_polling,
             should_run=should_run,
         )
@@ -194,6 +198,7 @@ def main():
     repository = configure_repository(config["aliro"])
     express = bool(config["aliro"].get("express", True))
     flow = resolve_flow(config["aliro"].get("flow", "fast"))
+    authentication_policy = AuthenticationPolicy.parse(config["aliro"].get("authentication_policy", "user"))
     throttle_polling = float(config["nfc"].get("throttle_polling") or 0.15)
 
     running = True
@@ -215,6 +220,7 @@ def main():
             repository,
             express=express,
             flow=flow,
+            authentication_policy=authentication_policy,
             throttle_polling=throttle_polling,
             should_run=should_run,
         )

@@ -27,6 +27,7 @@ from util.iso7816 import ISO7816, ISO7816Application, ISO7816Command, ISO7816Ins
 from util.structable import chunked, to_bytes
 from util.tlv.ber import BerTLV, BerTLVMessage
 
+from .authentication_policy import AuthenticationPolicy
 from .signaling_bitmask import SignalingBitmask
 
 PERSISTENT_ASTR = "Persistent**"
@@ -49,10 +50,6 @@ def _key_hex(value):
     if value is None:
         return None
     return bytes(value).hex().upper()
-
-
-class AliroTransactionType(IntEnum):
-    UNLOCK = 0x01
 
 
 class AliroTransactionFlags(IntEnum):
@@ -275,7 +272,7 @@ def fast_auth(
     protocol_version: bytes,
     transport_type: int,
     transaction_flags: int,
-    transaction_code: AliroTransactionType,
+    authentication_policy: AuthenticationPolicy,
     reader_group_identifier: bytes,
     reader_group_sub_identifier: bytes,
     reader_public_key: ec.EllipticCurvePublicKey,
@@ -295,7 +292,7 @@ def fast_auth(
     command_data = BerTLVMessage(
         [
             BerTLV(0x41, value=transaction_flags),
-            BerTLV(0x42, value=transaction_code),
+            BerTLV(0x42, value=authentication_policy),
             BerTLV(0x5C, value=protocol_version),
             BerTLV(0x87, value=reader_ephemeral_public_key_bytes),
             BerTLV(0x4C, value=transaction_identifier),
@@ -348,7 +345,7 @@ def fast_auth(
             BerTLV(0x5C, value=protocol_version),
             reader_ephemeral_public_key_x,
             transaction_identifier,
-            [transaction_flags, transaction_code],
+            [transaction_flags, authentication_policy],
             fci_proprietary_bytes,
             endpoint_public_key_x,
         ]
@@ -436,7 +433,7 @@ def standard_auth(  # noqa: C901
     protocol_version: bytes,
     transport_type: int,
     transaction_flags: int,
-    transaction_code: AliroTransactionType,
+    authentication_policy: AuthenticationPolicy,
     reader_group_identifier: bytes,
     reader_group_sub_identifier: bytes,
     reader_ephemeral_private_key: ec.EllipticCurvePrivateKey,
@@ -466,7 +463,7 @@ def standard_auth(  # noqa: C901
     x, y = decode_dss_signature(signature)
     signature_point_form = bytes([*x.to_bytes(32, "big"), *y.to_bytes(32, "big")])
     logging.info(f"signature_point_form={signature_point_form.hex()} ({hex(len(signature_point_form))})")
-    logging.info(f"transaction_flags={transaction_flags} transaction_code={transaction_code}")
+    logging.info(f"transaction_flags={transaction_flags} authentication_policy={authentication_policy}")
 
     data = BerTLVMessage(
         [
@@ -506,7 +503,7 @@ def standard_auth(  # noqa: C901
             BerTLV(0x5C, value=protocol_version),
             reader_ephemeral_public_key_x,
             transaction_identifier,
-            [transaction_flags, transaction_code],
+            [transaction_flags, authentication_policy],
             fci_proprietary_template,
         ]
     )
@@ -638,7 +635,7 @@ def standard_auth(  # noqa: C901
         BerTLV(0x5C, value=protocol_version),
         reader_ephemeral_public_key_x,
         transaction_identifier,
-        [transaction_flags, transaction_code],
+        [transaction_flags, authentication_policy],
         fci_proprietary_bytes,
         endpoint_public_key_x,
     ]
@@ -811,7 +808,7 @@ def perform_authentication_flow(
     fci_proprietary_template: List[bytes],
     transaction_identifier: bytes,
     transaction_flags: int,
-    transaction_code: AliroTransactionType,
+    authentication_policy: AuthenticationPolicy,
     transport_type: int,
     endpoints: List[Endpoint],
     mailbox_data=b"",
@@ -828,7 +825,7 @@ def perform_authentication_flow(
         protocol_version=protocol_version,
         transport_type=transport_type,
         transaction_flags=transaction_flags,
-        transaction_code=transaction_code,
+        authentication_policy=authentication_policy,
         reader_group_identifier=reader_group_identifier,
         reader_group_sub_identifier=reader_group_sub_identifier,
         reader_public_key=reader_public_key,
@@ -856,7 +853,7 @@ def perform_authentication_flow(
         protocol_version=protocol_version,
         transport_type=transport_type,
         transaction_flags=transaction_flags,
-        transaction_code=transaction_code,
+        authentication_policy=authentication_policy,
         transaction_identifier=transaction_identifier,
         reader_group_identifier=reader_group_identifier,
         reader_group_sub_identifier=reader_group_sub_identifier,
@@ -896,7 +893,7 @@ def read_aliro(
     endpoints: List[Endpoint],
     preferred_versions: Collection[bytes] = None,
     flow=AliroFlow.FAST,
-    transaction_code: AliroTransactionType = AliroTransactionType.UNLOCK,
+    authentication_policy: AuthenticationPolicy = AuthenticationPolicy.USER_DEVICE_SETTING,
     # Generated at random if not provided
     reader_ephemeral_private_key: bytes | None = None,
     # Generated at random if not provided
@@ -948,7 +945,7 @@ def read_aliro(
         fci_proprietary_template=BerTLV(0xA5, fci_proprietary_template),
         transaction_identifier=transaction_identifier or os.urandom(16),
         transaction_flags=transaction_flags,
-        transaction_code=transaction_code,
+        authentication_policy=authentication_policy,
         transport_type=transport_type,
         endpoints=endpoints,
         key_size=key_size,
