@@ -48,6 +48,8 @@ AUTH0_FAST_GCM_IV = b"\x00" * 12
 
 READER_MODE = bytes.fromhex("0000000000000000")
 ENDPOINT_MODE = bytes.fromhex("0000000000000001")
+APDU_COMMAND_CHAINING_CLA_BIT = 0x10
+APDU_COMMAND_CHAINING_MAX_CHUNK = 0xFF
 
 
 def _key_hex(value):
@@ -237,6 +239,72 @@ def generate_ec_key_if_provided_is_none(
     )
 
 
+def transceive_with_chaining(
+    tag: ISO7816Tag,
+    command: ISO7816Command,
+    *,
+    label: str,
+    allow_command_chaining: bool = True,
+    allow_response_chaining: bool = True,
+    max_chunk_size: int = APDU_COMMAND_CHAINING_MAX_CHUNK,
+) -> ISO7816Response:
+    response = None
+    last_command = command
+    payload = to_bytes(command.data)
+    if allow_command_chaining and len(payload) > max_chunk_size:
+        total_chunks = (len(payload) + max_chunk_size - 1) // max_chunk_size
+    else:
+        total_chunks = 1
+
+    for chunk_index in range(total_chunks):
+        if total_chunks == 1:
+            chunk_command = command
+        else:
+            start = chunk_index * max_chunk_size
+            chunk_payload = payload[start : start + max_chunk_size]
+            is_last = chunk_index == total_chunks - 1
+            chunk_command = ISO7816Command(
+                cla=command.cla if is_last else (command.cla | APDU_COMMAND_CHAINING_CLA_BIT),
+                ins=command.ins,
+                p1=command.p1,
+                p2=command.p2,
+                data=chunk_payload,
+                le=command.le if is_last else None,
+            )
+
+        chunk_number = chunk_index + 1
+        chunk_suffix = f" CHAIN {chunk_number}/{total_chunks}" if total_chunks > 1 else ""
+        logging.info(f"{label} COMMAND{chunk_suffix} {chunk_command}")
+        response = tag.transceive(chunk_command)
+        logging.info(f"{label} RESPONSE{chunk_suffix} {response}")
+        last_command = chunk_command
+        if chunk_number != total_chunks and response.sw != (0x90, 0x00):
+            raise ProtocolError(f"{label} INVALID STATUS DURING COMMAND CHAIN {response.sw}")
+
+    if response is None:
+        raise ProtocolError(f"{label} EMPTY RESPONSE")
+
+    if not allow_response_chaining or response.sw1 != 0x61:
+        return response
+
+    response_data = bytearray(response.data)
+    while response.sw1 == 0x61:
+        get_response_command = ISO7816Command(
+            cla=last_command.cla,
+            ins=ISO7816Instruction.GET_RESPONSE,
+            p1=0x00,
+            p2=0x00,
+            data=None,
+            le=response.sw2,
+        )
+        logging.info(f"{label} GET_RESPONSE COMMAND {get_response_command}")
+        response = tag.transceive(get_response_command)
+        logging.info(f"{label} GET_RESPONSE RESPONSE {response}")
+        response_data.extend(response.data)
+
+    return ISO7816Response(sw1=response.sw1, sw2=response.sw2, data=response_data)
+
+
 def fast_auth(  # noqa: C901
     tag: ISO7816Tag,
     fci_proprietary_template: List[bytes],
@@ -281,26 +349,8 @@ def fast_auth(  # noqa: C901
     )
 
     command = ISO7816Command(cla=0x80, ins=0x80, p1=0x00, p2=0x00, data=command_data, le=None)
-    logging.info(f"AUTH0 CMD = {command}")
-    response = tag.transceive(command)
+    response = transceive_with_chaining(tag, command, label="AUTH0")
     logging.info(f"AUTH0 RESPONSE: {response}")
-    response_data = bytearray(response.data)
-    while response.sw1 == 0x61:
-        get_response_command = ISO7816Command(
-            cla=command.cla,
-            ins=ISO7816Instruction.GET_RESPONSE,
-            p1=0x00,
-            p2=0x00,
-            data=None,
-            le=response.sw2,
-        )
-        logging.info(f"AUTH0 GET_RESPONSE COMMAND {get_response_command}")
-        response = tag.transceive(get_response_command)
-        logging.info(f"AUTH0 GET_RESPONSE RESPONSE {response}")
-        response_data.extend(response.data)
-
-    response = ISO7816Response(sw1=response.sw1, sw2=response.sw2, data=response_data)
-    logging.info(f"AUTH0 FULL RESPONSE: {response}")
     if response.sw != (0x90, 0x00):
         raise ProtocolError(f"AUTH0 INVALID STATUS {response.sw}")
     message = BerTLVMessage.from_bytes(response.data)
@@ -456,27 +506,7 @@ def load_cert(tag: ISO7816Tag, reader_cert: bytes):
         data=reader_cert,
         le=None,
     )
-    logging.info(f"LOAD_CERT CMD = {command}")
-    response = tag.transceive(command)
-    logging.info(f"LOAD_CERT RESPONSE: {response}")
-
-    response_data = bytearray(response.data)
-    while response.sw1 == 0x61:
-        get_response_command = ISO7816Command(
-            cla=command.cla,
-            ins=ISO7816Instruction.GET_RESPONSE,
-            p1=0x00,
-            p2=0x00,
-            data=None,
-            le=response.sw2,
-        )
-        logging.info(f"LOAD_CERT GET_RESPONSE COMMAND {get_response_command}")
-        response = tag.transceive(get_response_command)
-        logging.info(f"LOAD_CERT GET_RESPONSE RESPONSE {response}")
-        response_data.extend(response.data)
-
-    response = ISO7816Response(sw1=response.sw1, sw2=response.sw2, data=response_data)
-    logging.info(f"LOAD_CERT FULL RESPONSE: {response}")
+    response = transceive_with_chaining(tag, command, label="LOAD_CERT")
     if response.sw != (0x90, 0x00):
         raise ProtocolError(f"LOAD_CERT INVALID STATUS {response.sw}")
 
@@ -539,26 +569,7 @@ def standard_auth(  # noqa: C901
     )
     command = ISO7816Command(cla=0x80, ins=0x81, p1=0x00, p2=0x00, data=data)
 
-    logging.info(f"AUTH1 COMMAND {command}")
-    response = tag.transceive(command)
-    logging.info(f"AUTH1 RESPONSE: {response}")
-    response_data = bytearray(response.data)
-    while response.sw1 == 0x61:
-        get_response_command = ISO7816Command(
-            cla=command.cla,
-            ins=ISO7816Instruction.GET_RESPONSE,
-            p1=0x00,
-            p2=0x00,
-            data=None,
-            le=response.sw2,
-        )
-        logging.info(f"AUTH1 GET_RESPONSE COMMAND {get_response_command}")
-        response = tag.transceive(get_response_command)
-        logging.info(f"AUTH1 GET_RESPONSE RESPONSE {response}")
-        response_data.extend(response.data)
-
-    response = ISO7816Response(sw1=response.sw1, sw2=response.sw2, data=response_data)
-    logging.info(f"AUTH1 FULL RESPONSE: {response}")
+    response = transceive_with_chaining(tag, command, label="AUTH1")
     if response.sw != (0x90, 0x00):
         raise ProtocolError(f"AUTH1 INVALID STATUS {response.sw}")
 
@@ -817,25 +828,11 @@ def exchange_step_up_documents(tag: ISO7816Tag, channel: AliroSecureChannel):
         p2=0x00,
         data=BerTLV(0x53, device_request),
     )
-    logging.info(f"ENVELOPE2 CMD = {command}")
-    response = tag.transceive(command)
-    logging.info(f"ENVELOPE2 RES = {response}")
-
-    data = response.data
-
-    while response.sw1 == 0x61:
-        command = ISO7816Command(
-            cla=command.cla, ins=ISO7816Instruction.GET_RESPONSE, p1=0x00, p2=0x00, data=None, le=response.sw2
-        )
-        logging.info(f"GET DATA CMD = {command}")
-        response = tag.transceive(command)
-        logging.info(f"GET DATA RES = {response}")
-        data += response.data
-
+    response = transceive_with_chaining(tag, command, label="ENVELOPE")
     if response.sw1 != 0x90:
-        raise ProtocolError(f"ENVELOPE2 INVALID STATUS {response.sw}")
+        raise ProtocolError(f"ENVELOPE INVALID STATUS {response.sw}")
 
-    message = BerTLV.from_bytes(data).value
+    message = BerTLV.from_bytes(response.data).value
 
     try:
         cbor = cbor2.loads(message)
@@ -844,10 +841,10 @@ def exchange_step_up_documents(tag: ISO7816Tag, channel: AliroSecureChannel):
         cbor_ciphertext = message
 
     cbor_plaintext = channel.decrypt_data(cbor_ciphertext)
-    logging.info(f"ENVELOPE2 DECRYPTED RESPONSE: {cbor_plaintext.hex()}")
+    logging.info(f"ENVELOPE DECRYPTED RESPONSE: {cbor_plaintext.hex()}")
 
     cbor = cbor2.loads(cbor_plaintext)
-    logging.info(f"ENVELOPE2 DECRYPTED CBOR: {cbor}")
+    logging.info(f"ENVELOPE DECRYPTED CBOR: {cbor}")
 
     return cbor_plaintext
 
@@ -869,26 +866,12 @@ def exchange(
     logging.info(f"EXCHANGE COMMAND {command}")
 
     encrypted_command, _ = channel.encrypt_command(command)
-    logging.info(f"EXCHANGE ENCRYPTED COMMAND {encrypted_command}")
-    response = tag.transceive(encrypted_command)
-    logging.info(f"EXCHANGE ENCRYPTED RESPONSE {response} {skip_chaining}")
-
-    response_data = bytearray(response.data)
-    while response.sw1 == 0x61 and skip_chaining is False:
-        get_response_command = ISO7816Command(
-            cla=command.cla,
-            ins=ISO7816Instruction.GET_RESPONSE,
-            p1=0x00,
-            p2=0x00,
-            data=None,
-            le=response.sw2,
-        )
-        logging.info(f"EXCHANGE GET_RESPONSE COMMAND {get_response_command}")
-        response = tag.transceive(get_response_command)
-        logging.info(f"EXCHANGE GET_RESPONSE RESPONSE {response}")
-        response_data.extend(response.data)
-
-    response = ISO7816Response(sw1=response.sw1, sw2=response.sw2, data=response_data)
+    response = transceive_with_chaining(
+        tag,
+        encrypted_command,
+        label="EXCHANGE",
+        allow_response_chaining=not skip_chaining,
+    )
     if response.sw != (0x90, 0x00):
         return response
 
