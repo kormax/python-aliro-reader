@@ -23,7 +23,14 @@ from util.crypto import (
     hkdf_sha256,
     load_ec_public_key_from_bytes,
 )
-from util.iso7816 import ISO7816, ISO7816Application, ISO7816Command, ISO7816Instruction, ISO7816Response, ISO7816Tag
+from util.iso7816 import (
+    ISO7816,
+    ISO7816Application,
+    ISO7816Command,
+    ISO7816Instruction,
+    ISO7816Response,
+    ISO7816Tag,
+)
 from util.structable import chunked, to_bytes
 from util.tlv.ber import BerTLV, BerTLVMessage
 
@@ -50,6 +57,9 @@ READER_MODE = bytes.fromhex("0000000000000000")
 ENDPOINT_MODE = bytes.fromhex("0000000000000001")
 APDU_COMMAND_CHAINING_CLA_BIT = 0x10
 APDU_COMMAND_CHAINING_MAX_CHUNK = 0xFF
+APDU_DEFAULT_MAX_COMMAND_DATA = 255
+APDU_DEFAULT_MAX_RESPONSE_DATA = 256
+APDU_MAX_PRE_CHAINING_PAYLOAD = 2000
 
 
 def _key_hex(value):
@@ -120,7 +130,7 @@ class AliroSecureChannel:
                 p1=command.p1,
                 p2=command.p2,
                 data=ciphertext,
-                le=command.le,
+                ne=command.ne,
             ),
             self.counter_reader,
         )
@@ -152,7 +162,7 @@ class AliroSecureChannel:
                 p1=command.p1,
                 p2=command.p2,
                 data=plaintext,
-                le=command.le,
+                ne=command.ne,
             ),
             self.counter_reader,
         )
@@ -239,7 +249,23 @@ def generate_ec_key_if_provided_is_none(
     )
 
 
-def transceive_with_chaining(
+def resolve_max_command_data_size_from_select_fci(fci_proprietary_template: BerTLVMessage) -> int:
+    extended_info = fci_proprietary_template.find_by_tag_else(0x7F66, None)
+    if extended_info is None:
+        return APDU_DEFAULT_MAX_COMMAND_DATA
+
+    extended_fields = BerTLVMessage.from_bytes(extended_info.value).tags
+    max_reception_tag = next((field for field in extended_fields if field.tag == b"\x02"), None)
+    if max_reception_tag is None:
+        raise ProtocolError("Malformed SELECT response: 7F66 does not include max reception APDU size INTEGER")
+
+    max_command_data_size = int.from_bytes(max_reception_tag.value, "big")
+    if max_command_data_size <= 0:
+        raise ProtocolError(f"Malformed SELECT response: invalid max reception APDU size {max_command_data_size}")
+    return max_command_data_size
+
+
+def transceive_with_chaining(  # noqa: C901
     tag: ISO7816Tag,
     command: ISO7816Command,
     *,
@@ -250,33 +276,46 @@ def transceive_with_chaining(
 ) -> ISO7816Response:
     response = None
     last_command = command
+    max_response_apdu_size = APDU_DEFAULT_MAX_RESPONSE_DATA
     payload = to_bytes(command.data)
-    if allow_command_chaining and len(payload) > max_chunk_size:
-        total_chunks = (len(payload) + max_chunk_size - 1) // max_chunk_size
-    else:
-        total_chunks = 1
+    if len(payload) > APDU_MAX_PRE_CHAINING_PAYLOAD:
+        raise ProtocolError(
+            f"{label} command payload exceeds {APDU_MAX_PRE_CHAINING_PAYLOAD} bytes before chaining: {len(payload)}"
+        )
+    max_data_per_chunk = int(max_chunk_size)
+    if max_data_per_chunk <= 0:
+        raise ProtocolError(f"{label} invalid max command chunk size: {max_data_per_chunk}")
+    if len(payload) > max_data_per_chunk and not allow_command_chaining:
+        raise ProtocolError(
+            f"{label} command payload {len(payload)} exceeds APDU max {max_data_per_chunk} without chaining"
+        )
+
+    total_chunks = max(1, (len(payload) + max_data_per_chunk - 1) // max_data_per_chunk)
 
     for chunk_index in range(total_chunks):
-        if total_chunks == 1:
-            chunk_command = command
-        else:
-            start = chunk_index * max_chunk_size
-            chunk_payload = payload[start : start + max_chunk_size]
-            is_last = chunk_index == total_chunks - 1
-            chunk_command = ISO7816Command(
-                cla=command.cla if is_last else (command.cla | APDU_COMMAND_CHAINING_CLA_BIT),
-                ins=command.ins,
-                p1=command.p1,
-                p2=command.p2,
-                data=chunk_payload,
-                le=command.le if is_last else None,
-            )
+        start = chunk_index * max_data_per_chunk
+        chunk_payload = payload[start : start + max_data_per_chunk]
+        is_last = chunk_index == total_chunks - 1
+        chunk_requires_extended = len(chunk_payload) > APDU_COMMAND_CHAINING_MAX_CHUNK or (is_last and command.ne > 256)
+        chunk_command = ISO7816Command(
+            cla=command.cla if is_last else (command.cla | APDU_COMMAND_CHAINING_CLA_BIT),
+            ins=command.ins,
+            p1=command.p1,
+            p2=command.p2,
+            data=chunk_payload,
+            ne=command.ne if is_last else 0,
+            extended=chunk_requires_extended,
+        )
 
         chunk_number = chunk_index + 1
         chunk_suffix = f" CHAIN {chunk_number}/{total_chunks}" if total_chunks > 1 else ""
         logging.info(f"{label} COMMAND{chunk_suffix} {chunk_command}")
         response = tag.transceive(chunk_command)
         logging.info(f"{label} RESPONSE{chunk_suffix} {response}")
+        if len(response.data) > max_response_apdu_size:
+            raise ProtocolError(
+                f"{label} response APDU data length {len(response.data)} exceeds device max {max_response_apdu_size}"
+            )
         last_command = chunk_command
         if chunk_number != total_chunks and response.sw != (0x90, 0x00):
             raise ProtocolError(f"{label} INVALID STATUS DURING COMMAND CHAIN {response.sw}")
@@ -285,22 +324,40 @@ def transceive_with_chaining(
         raise ProtocolError(f"{label} EMPTY RESPONSE")
 
     if not allow_response_chaining or response.sw1 != 0x61:
+        if len(response.data) > APDU_MAX_PRE_CHAINING_PAYLOAD:
+            raise ProtocolError(
+                f"{label} response payload exceeds {APDU_MAX_PRE_CHAINING_PAYLOAD} bytes before chaining: "
+                f"{len(response.data)}"
+            )
         return response
 
     response_data = bytearray(response.data)
+    if len(response_data) > APDU_MAX_PRE_CHAINING_PAYLOAD:
+        raise ProtocolError(
+            f"{label} response payload exceeds {APDU_MAX_PRE_CHAINING_PAYLOAD} bytes before chaining: "
+            f"{len(response_data)}"
+        )
     while response.sw1 == 0x61:
         get_response_command = ISO7816Command(
             cla=last_command.cla,
             ins=ISO7816Instruction.GET_RESPONSE,
             p1=0x00,
             p2=0x00,
-            data=None,
-            le=response.sw2,
+            ne=256 if response.sw2 == 0 else response.sw2,
         )
         logging.info(f"{label} GET_RESPONSE COMMAND {get_response_command}")
         response = tag.transceive(get_response_command)
         logging.info(f"{label} GET_RESPONSE RESPONSE {response}")
+        if len(response.data) > max_response_apdu_size:
+            raise ProtocolError(
+                f"{label} response APDU data length {len(response.data)} exceeds device max {max_response_apdu_size}"
+            )
         response_data.extend(response.data)
+        if len(response_data) > APDU_MAX_PRE_CHAINING_PAYLOAD:
+            raise ProtocolError(
+                f"{label} response payload exceeds {APDU_MAX_PRE_CHAINING_PAYLOAD} bytes before chaining:"
+                f" {len(response_data)}"
+            )
 
     return ISO7816Response(sw1=response.sw1, sw2=response.sw2, data=response_data)
 
@@ -319,6 +376,7 @@ def fast_auth(  # noqa: C901
     reader_ephemeral_public_key: ec.EllipticCurvePublicKey,
     transaction_identifier: bytes,
     endpoints: List[Endpoint],
+    max_command_data_size: int = APDU_DEFAULT_MAX_COMMAND_DATA,
     key_size=16,
 ) -> Tuple[ec.EllipticCurvePublicKey, Endpoint | None, AliroSecureContext | None, bytes]:
     (
@@ -348,8 +406,8 @@ def fast_auth(  # noqa: C901
         ]
     )
 
-    command = ISO7816Command(cla=0x80, ins=0x80, p1=0x00, p2=0x00, data=command_data, le=None)
-    response = transceive_with_chaining(tag, command, label="AUTH0")
+    command = ISO7816Command(cla=0x80, ins=0x80, p1=0x00, p2=0x00, data=command_data)
+    response = transceive_with_chaining(tag, command, label="AUTH0", max_chunk_size=max_command_data_size)
     logging.info(f"AUTH0 RESPONSE: {response}")
     if response.sw != (0x90, 0x00):
         raise ProtocolError(f"AUTH0 INVALID STATUS {response.sw}")
@@ -497,16 +555,19 @@ def fast_auth(  # noqa: C901
     return endpoint_ephemeral_public_key, matched_endpoint, matched_secure, auth0_info_suffix
 
 
-def load_cert(tag: ISO7816Tag, reader_cert: bytes):
+def load_cert(
+    tag: ISO7816Tag,
+    reader_cert: bytes,
+    max_command_data_size: int = APDU_DEFAULT_MAX_COMMAND_DATA,
+):
     command = ISO7816Command(
         cla=0x80,
         ins=0xD1,
         p1=0x00,
         p2=0x00,
         data=reader_cert,
-        le=None,
     )
-    response = transceive_with_chaining(tag, command, label="LOAD_CERT")
+    response = transceive_with_chaining(tag, command, label="LOAD_CERT", max_chunk_size=max_command_data_size)
     if response.sw != (0x90, 0x00):
         raise ProtocolError(f"LOAD_CERT INVALID STATUS {response.sw}")
 
@@ -527,6 +588,7 @@ def standard_auth(  # noqa: C901
     endpoints: List[Endpoint],
     auth0_info_suffix: bytes = b"",
     reader_certificate: bytes | None = None,
+    max_command_data_size: int = APDU_DEFAULT_MAX_COMMAND_DATA,
     key_size=16,
 ) -> Tuple[bytes | None, Endpoint | None, AliroSecureContext | None]:
     reader_ephemeral_public_key = reader_ephemeral_private_key.public_key()
@@ -548,7 +610,7 @@ def standard_auth(  # noqa: C901
 
     if reader_certificate is not None:
         logging.info("LOAD_CERT enabled via configured reader_certificate (%d bytes)", len(reader_certificate))
-        load_cert(tag, reader_certificate)
+        load_cert(tag, reader_certificate, max_command_data_size=max_command_data_size)
 
     signature = auth_signing_private_key.sign(authentication_hash_input, ec.ECDSA(hashes.SHA256()))
     logging.info(f"signature={signature.hex()} ({hex(len(signature))})")
@@ -568,8 +630,7 @@ def standard_auth(  # noqa: C901
         ]
     )
     command = ISO7816Command(cla=0x80, ins=0x81, p1=0x00, p2=0x00, data=data)
-
-    response = transceive_with_chaining(tag, command, label="AUTH1")
+    response = transceive_with_chaining(tag, command, label="AUTH1", max_chunk_size=max_command_data_size)
     if response.sw != (0x90, 0x00):
         raise ProtocolError(f"AUTH1 INVALID STATUS {response.sw}")
 
@@ -786,7 +847,11 @@ def standard_auth(  # noqa: C901
     return k_persistent, endpoint, secure
 
 
-def exchange_step_up_documents(tag: ISO7816Tag, channel: AliroSecureChannel):
+def exchange_step_up_documents(
+    tag: ISO7816Tag,
+    channel: AliroSecureChannel,
+    max_command_data_size: int = APDU_DEFAULT_MAX_COMMAND_DATA,
+):
     device_request = channel.encrypt_envelope_command_data(
         cbor2.dumps(
             # Device request entry
@@ -828,7 +893,7 @@ def exchange_step_up_documents(tag: ISO7816Tag, channel: AliroSecureChannel):
         p2=0x00,
         data=BerTLV(0x53, device_request),
     )
-    response = transceive_with_chaining(tag, command, label="ENVELOPE")
+    response = transceive_with_chaining(tag, command, label="ENVELOPE", max_chunk_size=max_command_data_size)
     if response.sw1 != 0x90:
         raise ProtocolError(f"ENVELOPE INVALID STATUS {response.sw}")
 
@@ -855,6 +920,7 @@ def exchange(
     tlvs: bytes | BerTLV | BerTLVMessage | List[BerTLV] = b"",
     *,
     skip_chaining=False,
+    max_command_data_size: int = APDU_DEFAULT_MAX_COMMAND_DATA,
 ) -> ISO7816Response:
     command = ISO7816Command(
         cla=0x80,
@@ -871,6 +937,7 @@ def exchange(
         encrypted_command,
         label="EXCHANGE",
         allow_response_chaining=not skip_chaining,
+        max_chunk_size=max_command_data_size,
     )
     if response.sw != (0x90, 0x00):
         return response
@@ -905,7 +972,7 @@ def control_flow(
         ]
     )
 
-    command = ISO7816Command(cla=0x80, ins=0x3C, p1=0x00, p2=0x00, data=command_data, le=None)
+    command = ISO7816Command(cla=0x80, ins=0x3C, p1=0x00, p2=0x00, data=command_data)
     logging.info(f"OP_CONTROL_FLOW CMD = {command}")
     response = tag.transceive(command)
     logging.info(f"OP_CONTROL_FLOW RES = {response}")
@@ -918,6 +985,7 @@ def complete_transaction(
     tag: ISO7816Tag,
     secure: AliroSecureChannel | None,
     reader_status: ReaderStatus = ReaderStatus.STATE_UNSECURE,
+    max_command_data_size: int = APDU_DEFAULT_MAX_COMMAND_DATA,
 ):
     # Per spec, completion should be sent via EXCHANGE (0x97) when secure channel exists;
     # otherwise use CONTROL FLOW to indicate failure.
@@ -932,6 +1000,7 @@ def complete_transaction(
         secure,
         BerTLV(0x97, value=reader_status),
         skip_chaining=True,
+        max_command_data_size=max_command_data_size,
     )
     if response.sw1 not in (0x90, 0x61):
         logging.info("Reader status EXCHANGE failed, sending CONTROL FLOW failure indication")
@@ -955,6 +1024,7 @@ def perform_authentication_flow(
     reader_certificate: bytes | None,
     interface: Interface,
     endpoints: List[Endpoint],
+    max_command_data_size: int = APDU_DEFAULT_MAX_COMMAND_DATA,
     key_size=16,
 ) -> Tuple[AliroFlow, Endpoint | None]:
     """Returns an Endpoint if one was found and successfully authenticated."""
@@ -975,6 +1045,7 @@ def perform_authentication_flow(
         reader_ephemeral_public_key=reader_ephemeral_public_key,
         transaction_identifier=transaction_identifier,
         endpoints=endpoints,
+        max_command_data_size=max_command_data_size,
         key_size=key_size,
     )
 
@@ -983,6 +1054,7 @@ def perform_authentication_flow(
             tag,
             secure.exchange if secure is not None else None,
             reader_status=ReaderStatus.STATE_UNSECURE,
+            max_command_data_size=max_command_data_size,
         )
         return AliroFlow.FAST, endpoint
 
@@ -1002,6 +1074,7 @@ def perform_authentication_flow(
         endpoint_ephemeral_public_key=endpoint_ephemeral_public_key,
         auth0_info_suffix=auth0_info_suffix,
         reader_certificate=reader_certificate,
+        max_command_data_size=max_command_data_size,
         key_size=key_size,
     )
 
@@ -1014,6 +1087,7 @@ def perform_authentication_flow(
             tag,
             secure.exchange if secure is not None else None,
             reader_status=ReaderStatus.ACCESS_CREDENTIAL_PUBLIC_KEY_NOT_FOUND,
+            max_command_data_size=max_command_data_size,
         )
         return AliroFlow.STANDARD, None
 
@@ -1022,6 +1096,7 @@ def perform_authentication_flow(
             tag,
             secure.exchange if secure is not None else None,
             reader_status=ReaderStatus.STATE_UNSECURE,
+            max_command_data_size=max_command_data_size,
         )
         return AliroFlow.STANDARD, endpoint
 
@@ -1031,12 +1106,13 @@ def perform_authentication_flow(
         _ = select_applet(tag, applet=ISO7816Application.ALIRO_STEP_UP)
 
     if secure.step_up is not None:
-        _ = exchange_step_up_documents(tag, secure.step_up)
+        _ = exchange_step_up_documents(tag, secure.step_up, max_command_data_size=max_command_data_size)
 
     _ = complete_transaction(
         tag,
         secure.step_up if secure is not None else None,
         reader_status=ReaderStatus.STATE_UNSECURE,
+        max_command_data_size=max_command_data_size,
     )
 
     return AliroFlow.STEP_UP, endpoint
@@ -1069,6 +1145,8 @@ def read_aliro(
 
     fci_template = message.find_by_tag_else_throw(0x6F).to_message()
     fci_proprietary_template = fci_template.find_by_tag_else_throw(0xA5).to_message()
+    max_command_data_size = resolve_max_command_data_size_from_select_fci(fci_proprietary_template)
+    logging.info(f"Using max APDU data size from FCI: {max_command_data_size}")
     versions_tag = fci_proprietary_template.find_by_tag_else(0x5C, None)
     # type_tag = fci_proprietary_template.find_by_tag_else(0x80, None)
 
@@ -1108,6 +1186,7 @@ def read_aliro(
         reader_certificate=reader_certificate,
         interface=interface,
         endpoints=endpoints,
+        max_command_data_size=max_command_data_size,
         key_size=key_size,
     )
     if endpoint is not None:

@@ -4,10 +4,6 @@
   <img src="./assets/ALIRO.SCREEN.PHONE.DEMO.webp" alt="Aliro-based key on an iPhone" width="250px">
 </p>
 
-> [!WARNING]
-> This is an initial implementation based on protocol findings made before the official Aliro specification was released.
-> Current behavior may be partial or incorrect. Alignment with the official specification will be implemented shortly.
-
 > [!CAUTION]
 > At the current moment, this project **does not** provide built-in credential issuance/provisioning for user devices.
 > Users are fully responsible for procuring valid Aliro credentials and reader configuration material at this time.

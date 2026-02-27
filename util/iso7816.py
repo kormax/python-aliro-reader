@@ -31,50 +31,176 @@ class ISO7816Command(Packable):
     ins: Union[int, ISO7816Instruction]
     p1: int
     p2: int
-    lc: int
     data: bytes
-    le: int
+    ne: int
+    extended: bool
 
-    def __init__(self, *, cla=0x00, ins=0x00, p1=0x00, p2=0x00, data=None, le=None):
+    def __init__(
+        self,
+        *,
+        cla=0x00,
+        ins=0x00,
+        p1=0x00,
+        p2=0x00,
+        data=None,
+        ne=0,
+        extended: bool | None = None,
+    ):
         super().__init__()
         self.cla = cla
         self.ins = ins
         self.p1 = p1
         self.p2 = p2
-        self.data = data if data is not None else b""
-        self.le = le
+        self.data = to_bytes(data) if data is not None else b""
+        if len(self.data) > 0xFFFF:
+            raise ValueError(f"APDU data length exceeds extended limit (65535): {len(self.data)}")
 
-    @staticmethod
-    def from_bytes(data: bytearray):
-        cla, ins, p1, p2 = data[:4]
-        data_le = data[4:]
-        if len(data_le):
-            data_length = data_le[0]
-            data = data_le[1 : 1 + data_length]
-            le = None if len(data_le) == data_length else data_le[-1]
+        if ne is None:
+            ne_value = None  # auto: resolved to max for format after extended is known
+        elif ne == 0 or ne == -1:
+            ne_value = 0
         else:
-            data = bytearray()
-            le = None
-        return ISO7816Command(cla=cla, ins=ins, p1=p1, p2=p2, data=data, le=le)
+            ne_value = int(ne)
+            if ne_value < 0:
+                raise ValueError(f"Ne must be 0 (no Le field), None (max for format), or 1-65536, actual = {ne_value}")
+            elif ne_value > 65536:
+                raise ValueError(f"Ne {ne_value} exceeds maximum (65536)")
+
+        resolved_extended = (
+            bool(extended)
+            if extended is not None
+            else (len(self.data) > 0xFF or (ne_value is not None and ne_value > 256))
+        )
+
+        if ne_value is None:
+            ne_value = 65536 if resolved_extended else 256
+
+        if not resolved_extended and len(self.data) > 0xFF:
+            raise ValueError(
+                f"APDU data length {len(self.data)} exceeds short format limit (255); "
+                f"remove extended=False or reduce data"
+            )
+        if ne_value != 0:
+            ne_limit = 65536 if resolved_extended else 256
+            if ne_value > ne_limit:
+                raise ValueError(
+                    f"Ne {ne_value} exceeds {'extended' if resolved_extended else 'short'} format limit ({ne_limit})"
+                )
+
+        self.extended = resolved_extended
+        self.ne = ne_value
+
+    @classmethod
+    def from_bytes(cls, data: Union[bytes, bytearray]):  # noqa: C901
+        """
+        1:  | cla | ins | p1 | p2 |                                      len = 4
+        2s: | cla | ins | p1 | p2 | le |                                 len = 5
+        3s: | cla | ins | p1 | p2 | lc | body |                          len = 6..260
+        4s: | cla | ins | p1 | p2 | lc | body | le |                     len = 7..261
+        2e: | cla | ins | p1 | p2 | 00 | le1 | le2 |                     len = 7
+        3e: | cla | ins | p1 | p2 | 00 | lc1 | lc2 | body |              len = 8..65542
+        4e: | cla | ins | p1 | p2 | 00 | lc1 | lc2 | body | le1 | le2 |  len =10..65544
+        """
+        command = bytes(data)
+        if len(command) < 4:
+            raise ValueError("APDU command must contain at least 4 bytes (CLA, INS, P1, P2)")
+        cla, ins, p1, p2 = command[:4]
+        payload = command[4:]
+
+        # Case 1
+        if len(payload) == 0:
+            return cls(cla=cla, ins=ins, p1=p1, p2=p2, data=b"", extended=False)
+
+        # Case 2s must be handled before extended-marker detection because
+        # short Le=0x00 is valid and means "maximum short response length (Ne=256)".
+        if len(payload) == 1:
+            ne = 256 if payload[0] == 0 else payload[0]
+            return cls(cla=cla, ins=ins, p1=p1, p2=p2, data=b"", ne=ne, extended=False)
+
+        # Extended-length cases start with 0x00 after header.
+        if payload[0] == 0x00:
+            if len(payload) < 3:
+                raise ValueError("Malformed extended APDU: missing length bytes after 0x00 marker")
+
+            # Case 2e: header + 00 + Le(2)
+            if len(payload) == 3:
+                le = int.from_bytes(payload[1:3], "big")
+                ne = 65536 if le == 0 else le
+                return cls(cla=cla, ins=ins, p1=p1, p2=p2, data=b"", ne=ne, extended=True)
+
+            lc = int.from_bytes(payload[1:3], "big")
+            if lc == 0:
+                raise ValueError("Malformed extended APDU: Lc=0 is not valid for command data")
+
+            data_start = 3
+            data_end = data_start + lc
+            if len(payload) < data_end:
+                raise ValueError(
+                    f"Malformed extended APDU: Lc={lc} but only {len(payload) - data_start} data bytes present"
+                )
+            if len(payload) == data_end:
+                # Case 3e
+                return cls(cla=cla, ins=ins, p1=p1, p2=p2, data=payload[data_start:data_end], extended=True)
+            if len(payload) == data_end + 2:
+                # Case 4e
+                le = int.from_bytes(payload[data_end : data_end + 2], "big")
+                ne = 65536 if le == 0 else le
+                return cls(cla=cla, ins=ins, p1=p1, p2=p2, data=payload[data_start:data_end], ne=ne, extended=True)
+            raise ValueError(
+                f"Malformed extended APDU: {len(payload) - data_end} trailing bytes after data (expected 0 or 2)"
+            )
+
+        # Remaining short-length cases (payload[0] != 0x00, so lc >= 1).
+        lc = payload[0]
+        data_start = 1
+        data_end = data_start + lc
+        if len(payload) < data_end:
+            raise ValueError(f"Malformed short APDU: Lc={lc} but only {len(payload) - data_start} data bytes present")
+        if len(payload) == data_end:
+            # Case 3s
+            return cls(cla=cla, ins=ins, p1=p1, p2=p2, data=payload[data_start:data_end], extended=False)
+        if len(payload) == data_end + 1:
+            # Case 4s
+            le = payload[data_end]
+            ne = 256 if le == 0 else le
+            return cls(cla=cla, ins=ins, p1=p1, p2=p2, data=payload[data_start:data_end], ne=ne, extended=False)
+        raise ValueError(f"Malformed short APDU: {len(payload) - data_end} trailing bytes after data (expected 0 or 1)")
+
+    @property
+    def nc(self):
+        return len(to_bytes(self.data))
 
     @property
     def lc(self):
-        return len(to_bytes(self.data))
+        if self.nc == 0:
+            return b""
+        if self.extended:
+            return self.nc.to_bytes(2, "big")
+        return bytes([self.nc])
 
-    def to_bytes(self) -> bytearray:
-        force_extended_length = False
+    @property
+    def le(self) -> bytes:
+        if self.ne == 0:
+            return b""
+        limit = 65536 if self.extended else 256
+        wire = 0 if self.ne == limit else self.ne
+        if self.extended:
+            return wire.to_bytes(2, "big")
+        return bytes([wire])
 
-        le = (self.le,) if self.le is not None else ()
+    def to_bytes(self) -> bytes:
+        nc = self.nc
+        le = self.le
+        if self.extended:
+            if nc > 0:
+                return bytes([self.cla, self.ins, self.p1, self.p2, 0x00, *self.lc, *self.data, *le])
+            if le:
+                return bytes([self.cla, self.ins, self.p1, self.p2, 0x00, *le])
+            return bytes([self.cla, self.ins, self.p1, self.p2])
 
-        if 256 <= self.lc <= 65_535 or force_extended_length:
-            lc_data = to_bytes((0x00, self.lc.to_bytes(2, "big"), self.data))
-        elif 0 < self.lc < 256:
-            lc_data = to_bytes((self.lc, self.data))
-        elif self.lc == 0:
-            lc_data = ()
-        else:
-            raise ValueError(f"Length of an APDU should be in range [0, 65535], actual = {self.lc}")
-        return bytes([self.cla, self.ins, self.p1, self.p2, *lc_data, *le])
+        if nc > 0:
+            return bytes([self.cla, self.ins, self.p1, self.p2, *self.lc, *self.data, *le])
+        return bytes([self.cla, self.ins, self.p1, self.p2, *le])
 
     def __repr__(self):
         return (
@@ -83,9 +209,10 @@ class ISO7816Command(Packable):
             + f"; ins=0x{to_bytes(self.ins).hex()}"
             + f"; p1=0x{to_bytes(self.p1).hex()}"
             + f"; p2=0x{to_bytes(self.p2).hex()}"
-            + (f"; lc=0x{to_bytes(self.lc).hex()}({self.lc})" if self.lc else "")
-            + (f"; data={to_bytes(self.data).hex()}" if self.lc else "")
-            + (f"; le=0x{to_bytes(self.le).hex()}" if self.le is not None else "")
+            + (f"; lc=0x{self.lc.hex()}({self.nc})" if self.lc else "")
+            + (f"; data={to_bytes(self.data).hex()}" if self.nc else "")
+            + (f"; le=0x{self.le.hex()}" if self.le else "")
+            + (f"; extended={self.extended}" if self.extended is True else "")
             + ")"
         )
 
@@ -150,19 +277,19 @@ class ISO7816Response(Unpackable, Packable):
 
 class ISO7816:
     @classmethod
-    def select_file(cls, data: bytes, cla=0x00, p1=0x00, p2=0x00, le=0x00):
+    def select_file(cls, data: bytes, cla=0x00, p1=0x00, p2=0x00, ne=256):
         return ISO7816Command(
             cla=cla,
             ins=ISO7816Instruction.SELECT_FILE,
             p1=p1,
             p2=p2,
             data=data,
-            le=le,
+            ne=ne,
         )
 
     @classmethod
-    def select_aid(cls, aid: Union[bytes, ISO7816Application], p1=0x04, p2=0x00, le=0x00):
-        return cls.select_file(data=aid, p1=p1, p2=p2, le=0x00)
+    def select_aid(cls, aid: Union[bytes, ISO7816Application], p1=0x04, p2=0x00, ne=256):
+        return cls.select_file(data=aid, p1=p1, p2=p2, ne=ne)
 
 
 class ISO7816Tag:
