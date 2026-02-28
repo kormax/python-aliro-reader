@@ -18,6 +18,7 @@ from util.iso7816 import ISO7816Tag
 
 # By default, this file is located in the same folder as the project
 CONFIGURATION_FILE_PATH = "configuration.json"
+DEFAULT_STEP_UP_DATA_ELEMENT = "matter1"
 
 
 def load_configuration(path=CONFIGURATION_FILE_PATH) -> dict:
@@ -84,6 +85,65 @@ def resolve_auth0_command_vendor_extension(value) -> bytes | None:
     raise ValueError("aliro.auth0_command_vendor_extension must be null, hex string, or base64 string")
 
 
+def _normalize_step_up_data_element_identifiers(value, value_path: str) -> list[str]:
+    if value is None:
+        scopes = [DEFAULT_STEP_UP_DATA_ELEMENT]
+    elif isinstance(value, str):
+        scopes = [value]
+    elif isinstance(value, list):
+        scopes = value
+    else:
+        raise ValueError(f"{value_path} must be a string, array of strings, or null")
+
+    normalized_scopes = []
+    for index, raw_scope in enumerate(scopes):
+        if not isinstance(raw_scope, str):
+            raise ValueError(f"{value_path}[{index}] must be a string")
+        scope = raw_scope.strip()
+        if scope == "":
+            raise ValueError(f"{value_path}[{index}] must not be empty")
+        if len(scope) > 128:
+            raise ValueError(f"{value_path}[{index}] exceeds 128 characters")
+        if scope not in normalized_scopes:
+            normalized_scopes.append(scope)
+
+    if not normalized_scopes:
+        raise ValueError(f"{value_path} must not be empty")
+
+    return normalized_scopes
+
+
+def resolve_step_up_scopes(value) -> dict[str, bool]:
+    if isinstance(value, dict):
+        normalized_scopes: dict[str, bool] = {}
+        for raw_scope, raw_keep_marker in value.items():
+            scope = _normalize_step_up_data_element_identifiers([raw_scope], "aliro.step_up_scopes keys")[0]
+            if isinstance(raw_keep_marker, bool):
+                keep = raw_keep_marker
+            elif isinstance(raw_keep_marker, str):
+                marker = raw_keep_marker.strip().lower().replace("-", "").replace("_", "")
+                if marker in ("keep", "true", "yes", "1"):
+                    keep = True
+                elif marker in ("nokeep", "false", "no", "0"):
+                    keep = False
+                else:
+                    raise ValueError(f"aliro.step_up_scopes[{scope}] must be boolean or marker string keep/nokeep")
+            else:
+                raise ValueError(f"aliro.step_up_scopes[{scope}] must be boolean or marker string keep/nokeep")
+            normalized_scopes[scope] = keep
+
+        if not normalized_scopes:
+            raise ValueError("aliro.step_up_scopes must not be empty")
+
+        logging.info(f"Configured Step-up scope request map: {normalized_scopes}")
+        return normalized_scopes
+
+    scopes = _normalize_step_up_data_element_identifiers(value, "aliro.step_up_scopes")
+    scope_map = dict.fromkeys(scopes, True)
+    logging.info(f"Configured Step-up scope request map: {scope_map}")
+    return scope_map
+
+
 def configure_logging(config: dict):
     formatter = logging.Formatter("[%(asctime)s] [%(levelname)8s] %(module)-18s:%(lineno)-4d %(message)s")
     hdlr = logging.StreamHandler(sys.stdout)
@@ -138,6 +198,7 @@ def read_aliro_once(  # noqa: C901
     authentication_policy: AuthenticationPolicy,
     reader_certificate: bytes | None,
     auth0_command_vendor_extension: bytes | None,
+    step_up_scopes: dict[str, bool],
     throttle_polling: float,
     should_run,
 ):
@@ -184,6 +245,7 @@ def read_aliro_once(  # noqa: C901
             authentication_policy=authentication_policy,
             reader_certificate=reader_certificate,
             auth0_command_vendor_extension=auth0_command_vendor_extension,
+            step_up_scopes=step_up_scopes,
             reader_group_identifier=repository.get_reader_group_identifier(),
             reader_group_sub_identifier=repository.get_reader_group_sub_identifier(),
             reader_private_key=repository.get_reader_private_key(),
@@ -218,6 +280,7 @@ def run_aliro(
     authentication_policy: AuthenticationPolicy,
     reader_certificate: bytes | None,
     auth0_command_vendor_extension: bytes | None,
+    step_up_scopes: dict[str, bool],
     throttle_polling: float,
     should_run,
 ):
@@ -239,6 +302,7 @@ def run_aliro(
             authentication_policy=authentication_policy,
             reader_certificate=reader_certificate,
             auth0_command_vendor_extension=auth0_command_vendor_extension,
+            step_up_scopes=step_up_scopes,
             throttle_polling=throttle_polling,
             should_run=should_run,
         )
@@ -268,6 +332,7 @@ def main():
     auth0_command_vendor_extension = resolve_auth0_command_vendor_extension(
         config["aliro"].get("auth0_command_vendor_extension")
     )
+    step_up_scopes = resolve_step_up_scopes(config["aliro"].get("step_up_scopes"))
     throttle_polling = float(config["nfc"].get("throttle_polling") or 0.15)
 
     running = True
@@ -292,6 +357,7 @@ def main():
             authentication_policy=authentication_policy,
             reader_certificate=reader_certificate,
             auth0_command_vendor_extension=auth0_command_vendor_extension,
+            step_up_scopes=step_up_scopes,
             throttle_polling=throttle_polling,
             should_run=should_run,
         )

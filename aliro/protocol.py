@@ -5,7 +5,6 @@ from collections.abc import Collection
 from enum import IntEnum
 from typing import List, Tuple
 
-import cbor2
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -15,10 +14,8 @@ from cryptography.hazmat.primitives.asymmetric.utils import (
 )
 from cryptography.hazmat.primitives.kdf.x963kdf import X963KDF
 
-from entity import Endpoint, KeyType
 from util.crypto import (
     decrypt_aes_gcm,
-    encrypt_aes_gcm,
     get_ec_key_public_points,
     hkdf_sha256,
     load_ec_public_key_from_bytes,
@@ -36,9 +33,19 @@ from util.tlv.ber import BerTLV, BerTLVMessage
 
 from .auth1_command_parameters import Auth1CommandParameters
 from .authentication_policy import AuthenticationPolicy
+from .document import (
+    ACCESS_DOCUMENT_TYPE,
+    REVOCATION_DOCUMENT_TYPE,
+    DeviceRequest,
+    DeviceResponse,
+    DocumentRequest,
+    SessionData,
+)
+from .endpoint import Endpoint, KeyType
 from .flow import AliroFlow
 from .interface import Interface
 from .reader_status import ReaderStatus
+from .sercure_context import AliroSecureChannel, AliroSecureContext
 from .signaling_bitmask import SignalingBitmask
 
 PERSISTENT_ASTR = "Persistent**"
@@ -53,8 +60,6 @@ DEVICE_CONTEXT = (1317567308).to_bytes(4, "big")
 AUTH0_FAST_GCM_IV = b"\x00" * 12
 
 
-READER_MODE = bytes.fromhex("0000000000000000")
-ENDPOINT_MODE = bytes.fromhex("0000000000000001")
 APDU_COMMAND_CHAINING_CLA_BIT = 0x10
 APDU_COMMAND_CHAINING_MAX_CHUNK = 0xFF
 APDU_DEFAULT_MAX_COMMAND_DATA = 255
@@ -62,169 +67,9 @@ APDU_DEFAULT_MAX_RESPONSE_DATA = 256
 APDU_MAX_PRE_CHAINING_PAYLOAD = 2000
 
 
-def _key_hex(value):
-    if value is None:
-        return None
-    return bytes(value).hex().upper()
-
-
 class AliroTransactionFlags(IntEnum):
     STANDARD = 0x00
     FAST = 0x01
-
-
-class AliroSecureChannel:
-    sk_reader: bytes
-    sk_device: bytes
-
-    counter_reader: int
-    counter_endpoint: int
-
-    def __init__(self, sk_reader: bytes, sk_device: bytes, counter_reader=1, counter_endpoint=1):
-        self.sk_reader = sk_reader
-        self.sk_device = sk_device
-
-        self.counter_reader = counter_reader
-        self.counter_endpoint = counter_endpoint
-
-    def __repr__(self) -> str:
-        return (
-            "AliroSecureChannel("
-            + f"sk_reader={_key_hex(self.sk_reader)!r}, "
-            + f"sk_device={_key_hex(self.sk_device)!r}, "
-            + f"counter_reader={self.counter_reader}, "
-            + f"counter_endpoint={self.counter_endpoint}"
-            + ")"
-        )
-
-    def encrypt_reader_data(self, plaintext: bytes) -> bytes:
-        iv = READER_MODE + self.counter_reader.to_bytes(4, "big")
-        ciphertext = plaintext if not plaintext else encrypt_aes_gcm(self.sk_reader, iv, plaintext)
-        self.counter_reader += 1
-        return ciphertext
-
-    def decrypt_reader_data(self, ciphertext: bytes) -> bytes:
-        iv = READER_MODE + self.counter_reader.to_bytes(4, "big")
-        plaintext = ciphertext if not ciphertext else decrypt_aes_gcm(self.sk_reader, iv, ciphertext)
-        self.counter_reader += 1
-        return plaintext
-
-    def encrypt_endpoint_data(self, plaintext: bytes) -> bytes:
-        iv = ENDPOINT_MODE + self.counter_endpoint.to_bytes(4, "big")
-        ciphertext = plaintext if not plaintext else encrypt_aes_gcm(self.sk_device, iv, plaintext)
-        self.counter_endpoint += 1
-        return ciphertext
-
-    def decrypt_endpoint_data(self, ciphertext: bytes) -> bytes:
-        iv = ENDPOINT_MODE + self.counter_endpoint.to_bytes(4, "big")
-        plaintext = ciphertext if not ciphertext else decrypt_aes_gcm(self.sk_device, iv, ciphertext)
-        self.counter_endpoint += 1
-        return plaintext
-
-    def encrypt_command(self, command: ISO7816Command) -> Tuple[ISO7816Command, int]:
-        ciphertext = self.encrypt_reader_data(command.data)
-        return (
-            ISO7816Command(
-                cla=command.cla,
-                ins=command.ins,
-                p1=command.p1,
-                p2=command.p2,
-                data=ciphertext,
-                ne=command.ne,
-            ),
-            self.counter_reader,
-        )
-
-    def decrypt_response(self, response: ISO7816Response) -> Tuple[ISO7816Response, int]:
-        plaintext = self.decrypt_endpoint_data(response.data)
-        return (
-            ISO7816Response(sw1=response.sw1, sw2=response.sw2, data=plaintext),
-            self.counter_endpoint,
-        )
-
-    def encrypt_envelope_command_data(self, message: bytes):
-        return cbor2.dumps({"data": self.encrypt_reader_data(message)})
-
-    def decrypt_envelope_response_data(self, message: bytes):
-        cbor = cbor2.loads(message)
-        cbor_ciphertext = cbor["data"]
-        return self.decrypt_endpoint_data(cbor_ciphertext)
-
-    def decrypt_data(self, ciphertext: bytes) -> bytes:
-        return self.decrypt_endpoint_data(ciphertext)
-
-    def decrypt_command(self, command: ISO7816Command) -> Tuple[ISO7816Command, int]:
-        plaintext = self.decrypt_reader_data(command.data)
-        return (
-            ISO7816Command(
-                cla=command.cla,
-                ins=command.ins,
-                p1=command.p1,
-                p2=command.p2,
-                data=plaintext,
-                ne=command.ne,
-            ),
-            self.counter_reader,
-        )
-
-
-class AliroSecureContext:
-    exchange: AliroSecureChannel
-    ble: AliroSecureChannel
-    step_up: AliroSecureChannel
-    uwb_ranging_sk: bytes
-    cryptogram_sk: bytes
-
-    def __init__(
-        self,
-        exchange_sk_reader,
-        exchange_sk_device,
-        ble_sk_reader=None,
-        ble_sk_device=None,
-        step_up_sk_reader=None,
-        step_up_sk_device=None,
-        uwb_ranging_sk=None,
-        cryptogram_sk=None,
-    ):
-        self.exchange = AliroSecureChannel(
-            sk_reader=exchange_sk_reader,
-            sk_device=exchange_sk_device,
-            counter_endpoint=1,
-            counter_reader=1,
-        )
-
-        self.ble = (
-            AliroSecureChannel(sk_reader=ble_sk_reader, sk_device=ble_sk_device)
-            if ble_sk_reader and ble_sk_device
-            else None
-        )
-        self.step_up = (
-            AliroSecureChannel(sk_reader=step_up_sk_reader, sk_device=step_up_sk_device)
-            if step_up_sk_reader and step_up_sk_device
-            else None
-        )
-
-        self.uwb_ranging_sk = uwb_ranging_sk
-        self.cryptogram_sk = cryptogram_sk
-
-    def __repr__(self) -> str:
-        return (
-            "AliroSecureContext("
-            + (
-                ", ".join(
-                    e
-                    for e in [
-                        f"exchange={self.exchange!r}" if self.exchange else None,
-                        f"ble={self.ble!r}" if self.ble else None,
-                        f"step_up={self.step_up!r}" if self.step_up else None,
-                        f"uwb_ranging_sk={self.uwb_ranging_sk.hex()}" if self.uwb_ranging_sk else None,
-                        f"cryptogram_sk={self.cryptogram_sk.hex()}" if self.cryptogram_sk else None,
-                    ]
-                    if e is not None
-                )
-            )
-            + ")"
-        )
 
 
 class ProtocolError(Exception):
@@ -237,6 +82,21 @@ def find_endpoint_by_key_slot(endpoints: List[Endpoint], key_slot):
 
 def find_endpoint_by_public_key(endpoints: List[Endpoint], public_key: bytes):
     return next((e for e in endpoints if e.public_key == public_key), None)
+
+
+def _resolve_step_up_requested_document_types(signaling_bitmask: SignalingBitmask | None) -> list[str]:
+    if signaling_bitmask is None:
+        logging.warning(
+            "AUTH1 signaling bitmask is missing; defaulting Step-up document request to access document only"
+        )
+        return [ACCESS_DOCUMENT_TYPE]
+
+    requested_document_types = []
+    if signaling_bitmask & SignalingBitmask.ACCESS_DOCUMENT_RETRIEVABLE:
+        requested_document_types.append(ACCESS_DOCUMENT_TYPE)
+    if signaling_bitmask & SignalingBitmask.REVOCATION_DOCUMENT_RETRIEVABLE:
+        requested_document_types.append(REVOCATION_DOCUMENT_TYPE)
+    return requested_document_types
 
 
 def generate_ec_key_if_provided_is_none(
@@ -548,7 +408,7 @@ def fast_auth(  # noqa: C901
         logging.info(f"Derived secure context: {secure!r}")
         endpoint.credential_signed_timestamp = credential_signed_timestamp
         endpoint.revocation_signed_timestamp = revocation_signed_timestamp
-        endpoint.last_signaling_bitmask = signaling_bitmask
+        endpoint.signaling_bitmask = signaling_bitmask
         matched_endpoint = endpoint
         matched_secure = secure
         break
@@ -829,7 +689,7 @@ def standard_auth(  # noqa: C901
     )
     if endpoint is None:
         endpoint = Endpoint(
-            last_used_at=0,
+            used_at=0,
             counter=0,
             key_type=KeyType.SECP256R1,
             public_key=device_public_key,
@@ -837,61 +697,53 @@ def standard_auth(  # noqa: C901
             key_slot=key_slot,
             credential_signed_timestamp=credential_signed_timestamp,
             revocation_signed_timestamp=revocation_signed_timestamp,
-            last_signaling_bitmask=signaling_bitmask,
+            signaling_bitmask=signaling_bitmask,
         )
     else:
         endpoint.persistent_key = k_persistent
         endpoint.credential_signed_timestamp = credential_signed_timestamp
         endpoint.revocation_signed_timestamp = revocation_signed_timestamp
-        endpoint.last_signaling_bitmask = signaling_bitmask
+        endpoint.signaling_bitmask = signaling_bitmask
     return k_persistent, endpoint, secure
 
 
-def exchange_step_up_documents(
+def exchange_step_up_documents(  # noqa: C901
     tag: ISO7816Tag,
     channel: AliroSecureChannel,
     max_command_data_size: int = APDU_DEFAULT_MAX_COMMAND_DATA,
-):
-    device_request = channel.encrypt_envelope_command_data(
-        cbor2.dumps(
-            # Device request entry
-            {
-                # Version
-                "1": "1.0",
-                # Document requests
-                "2": [
-                    {
-                        # Items request
-                        "1": cbor2.CBORTag(
-                            24,
-                            cbor2.dumps(
-                                {
-                                    # Name spaces
-                                    "1": {
-                                        "aliro-a": {
-                                            "element2": True,
-                                            "element4": True,
-                                        },
-                                    },
-                                    # Document type
-                                    "5": "aliro-a",
-                                    # Auxilliary data
-                                    # "2"
-                                }
-                            ),
-                        )
-                    }
-                ],
-            }
-        )
+    requested_document_types: List[str] | None = None,
+    step_up_scopes: dict[str, bool] | None = None,
+) -> DeviceResponse:
+    requested_document_types = requested_document_types or [ACCESS_DOCUMENT_TYPE]
+    requested_document_types = [doc_type.strip() for doc_type in requested_document_types if doc_type]
+    for doc_type in requested_document_types:
+        if doc_type not in (ACCESS_DOCUMENT_TYPE, REVOCATION_DOCUMENT_TYPE):
+            raise ValueError(f"Unsupported step-up requested docType: {doc_type}")
+
+    if step_up_scopes is None or not isinstance(step_up_scopes, dict) or not step_up_scopes:
+        raise ValueError("step_up_scopes must be a non-empty dict")
+    requested_scope_map = step_up_scopes
+
+    logging.info(
+        "ENVELOPE Step-up DeviceRequest requested_document_types=%s scopes=%s",
+        requested_document_types,
+        requested_scope_map,
     )
+
+    device_request = DeviceRequest(
+        version="1.0",
+        document_requests=[
+            DocumentRequest(doc_type=doc_type, scopes=requested_scope_map) for doc_type in requested_document_types
+        ],
+    )
+    session_data = SessionData(data=channel.encrypt_reader_data(device_request))
 
     command = ISO7816Command(
         cla=0x00,
         ins=0xC3,
         p1=0x00,
         p2=0x00,
-        data=BerTLV(0x53, device_request),
+        data=BerTLV(0x53, session_data),
     )
     response = transceive_with_chaining(tag, command, label="ENVELOPE", max_chunk_size=max_command_data_size)
     if response.sw1 != 0x90:
@@ -899,19 +751,44 @@ def exchange_step_up_documents(
 
     message = BerTLV.from_bytes(response.data).value
 
+    # Device may return either a SessionData-wrapped ciphertext or raw ciphertext, so we try both
     try:
-        cbor = cbor2.loads(message)
-        cbor_ciphertext = cbor["data"]
-    except Exception:
-        cbor_ciphertext = message
+        session_data = SessionData.from_bytes(message)
+        cbor_plaintext = channel.decrypt_endpoint_data(session_data.data)
+    except ValueError:
+        cbor_plaintext = channel.decrypt_endpoint_data(message)
 
-    cbor_plaintext = channel.decrypt_data(cbor_ciphertext)
-    logging.info(f"ENVELOPE DECRYPTED RESPONSE: {cbor_plaintext.hex()}")
+    try:
+        device_response = DeviceResponse.from_cbor(cbor_plaintext)
+    except ValueError as exc:
+        raise ProtocolError(str(exc)) from exc
 
-    cbor = cbor2.loads(cbor_plaintext)
-    logging.info(f"ENVELOPE DECRYPTED CBOR: {cbor}")
+    if device_response.status not in (None, 0):
+        logging.warning(f"ENVELOPE DeviceResponse status indicates failure: {device_response.status}")
 
-    return cbor_plaintext
+    access_documents = device_response.access_documents
+    revocation_documents = device_response.revocation_documents
+    requested_document_type_set = set(requested_document_types)
+
+    if ACCESS_DOCUMENT_TYPE in requested_document_type_set and not access_documents:
+        logging.warning("ENVELOPE DeviceResponse contained no access documents (docType='aliro-a')")
+    elif access_documents:
+        logging.info("ENVELOPE DeviceResponse returned %d access document(s)", len(access_documents))
+        for doc in access_documents:
+            logging.info(
+                "ENVELOPE DeviceResponse access document docType=%s mso=%s",
+                doc.doc_type,
+                doc.issuer_auth.mobile_security_object
+                if doc.issuer_auth and doc.issuer_auth.mobile_security_object
+                else None,
+            )
+
+    if REVOCATION_DOCUMENT_TYPE in requested_document_type_set and not revocation_documents:
+        logging.warning("ENVELOPE DeviceResponse contained no revocation documents (docType='aliro-r')")
+    elif revocation_documents:
+        logging.info("ENVELOPE DeviceResponse returned %d revocation document(s)", len(revocation_documents))
+
+    return device_response
 
 
 def exchange(
@@ -947,7 +824,7 @@ def exchange(
     return response
 
 
-def select_applet(tag: ISO7816Tag, applet=ISO7816Application.ALIRO):
+def select_applet(tag: ISO7816Tag, applet=ISO7816Application.ALIRO_EXPEDITED):
     command = ISO7816.select_aid(applet)
     logging.info(f"SELECT CMD = {command}")
     response = tag.transceive(command)
@@ -1025,6 +902,7 @@ def perform_authentication_flow(
     interface: Interface,
     endpoints: List[Endpoint],
     max_command_data_size: int = APDU_DEFAULT_MAX_COMMAND_DATA,
+    step_up_scopes: dict[str, bool] | None = None,
     key_size=16,
 ) -> Tuple[AliroFlow, Endpoint | None]:
     """Returns an Endpoint if one was found and successfully authenticated."""
@@ -1100,13 +978,28 @@ def perform_authentication_flow(
         )
         return AliroFlow.STANDARD, endpoint
 
-    if endpoint.last_signaling_bitmask is None or (
-        endpoint.last_signaling_bitmask & SignalingBitmask.STEP_UP_SELECT_REQUIRED_FOR_DOC_RETRIEVAL
+    if endpoint.signaling_bitmask is None or (
+        endpoint.signaling_bitmask & SignalingBitmask.STEP_UP_SELECT_REQUIRED_FOR_DOC_RETRIEVAL
     ):
         _ = select_applet(tag, applet=ISO7816Application.ALIRO_STEP_UP)
 
     if secure.step_up is not None:
-        _ = exchange_step_up_documents(tag, secure.step_up, max_command_data_size=max_command_data_size)
+        requested_document_types = _resolve_step_up_requested_document_types(endpoint.signaling_bitmask)
+        if not requested_document_types:
+            logging.warning(
+                "Skipping ENVELOPE Step-up document request: signaling bitmask does not indicate "
+                "retrievable access/revocation documents (%s)",
+                endpoint.signaling_bitmask,
+            )
+        else:
+            device_response = exchange_step_up_documents(
+                tag,
+                secure.step_up,
+                max_command_data_size=max_command_data_size,
+                requested_document_types=requested_document_types,
+                step_up_scopes=step_up_scopes,
+            )
+            endpoint.documents = device_response.documents
 
     _ = complete_transaction(
         tag,
@@ -1134,15 +1027,14 @@ def read_aliro(
     # Generated at random if not provided
     transaction_identifier: bytes | None = None,
     interface=Interface.NFC,
+    step_up_scopes: dict[str, bool] | None = None,
     key_size=16,
 ) -> Tuple[AliroFlow, Endpoint | None]:
     """Returns the authentication flow used and an optional endpoint if authentication was successful."""
     command_parameters = sum({AliroTransactionFlags.FAST if flow <= AliroFlow.FAST else AliroTransactionFlags.STANDARD})
 
-    response = select_applet(tag, applet=ISO7816Application.ALIRO)
-
+    response = select_applet(tag, applet=ISO7816Application.ALIRO_EXPEDITED)
     message = BerTLVMessage.from_bytes(response)
-
     fci_template = message.find_by_tag_else_throw(0x6F).to_message()
     fci_proprietary_template = fci_template.find_by_tag_else_throw(0xA5).to_message()
     max_command_data_size = resolve_max_command_data_size_from_select_fci(fci_proprietary_template)
@@ -1187,13 +1079,14 @@ def read_aliro(
         interface=interface,
         endpoints=endpoints,
         max_command_data_size=max_command_data_size,
+        step_up_scopes=step_up_scopes,
         key_size=key_size,
     )
     if endpoint is not None:
-        endpoint.last_used_at = int(time.time())
+        endpoint.used_at = int(time.time())
         endpoint.counter += 1
-        endpoint.last_fci_template = BerTLV(0xA5, fci_proprietary_template).to_bytes()
-        endpoint.last_protocol_version = protocol_version
-        endpoint.last_auth_flow = result_flow.name
+        endpoint.fci_template = BerTLV(0xA5, fci_proprietary_template).to_bytes()
+        endpoint.protocol_version = protocol_version
+        endpoint.auth_flow = result_flow.name
 
     return result_flow, endpoint

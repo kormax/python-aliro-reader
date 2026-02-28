@@ -12,7 +12,7 @@ from util.structable import Packable, Unpackable, to_bytes
 
 
 class ISO7816Application(Enum):
-    ALIRO = bytes.fromhex("A000000909ACCE5501")
+    ALIRO_EXPEDITED = bytes.fromhex("A000000909ACCE5501")
     ALIRO_STEP_UP = bytes.fromhex("A000000909ACCE5502")
 
 

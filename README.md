@@ -82,6 +82,10 @@ ls /dev/tty.*
   - `true`: generate a profile0000 certificate once at startup from `reader_private_key` using a generated intermediate subject key; active `reader_private_key` is then replaced with that intermediate private key for authentication;
   - `string`: profile0000 certificate bytes encoded as hex or base64;
   configured certificates are validated locally for profile format, and subject key is checked against `reader_private_key`;
+- `step_up_scopes`: optional scope request map used in Step-up DeviceRequest for requested docTypes (`aliro-a` / `aliro-r` selected automatically from signaling bitmask):
+  - string/array of strings: all scopes are sent with `keep=true`;
+  - object map `scope -> keep marker`: each marker can be boolean or string (`keep` / `nokeep`);
+  - defaults to `{"matter1": true}` when omitted.
 - `reader_private_key`: reader private key as hex;
 - `reader_group_identifier`: group identifier as hex;
 - `reader_group_sub_identifier`: reader group sub-identifier as hex.
@@ -92,7 +96,6 @@ ls /dev/tty.*
 - [`main.py`](./main.py): runtime entrypoint, configuration loading, NFC loop, signal handling;
 - [`aliro/`](./aliro): core Aliro protocol/authentication logic module;
 - [`repository.py`](./repository.py): state persistence for reader metadata/endpoints;
-- [`entity.py`](./entity.py): protocol and endpoint entities;
 - [`util/afclf.py`](./util/afclf.py): modified contactless frontend transport helpers;
 - [`util/`](./util): cryptography, ISO7816, TLV, ECP helpers.
 

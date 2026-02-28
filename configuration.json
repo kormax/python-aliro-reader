@@ -11,6 +11,9 @@
         "persist": "persist.json",
         "flow": "fast",
         "authentication_policy": "user_device_setting",
+        "step_up_scopes": {
+            "matter1": "keep"
+        },
 
         "reader_certificate": false,
         "reader_private_key": "0000000000000000000000000000000000000000000000000000000000000001",

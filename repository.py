@@ -4,7 +4,7 @@ import logging
 from threading import Lock
 from typing import List
 
-from entity import Endpoint
+from aliro.endpoint import Endpoint
 
 log = logging.getLogger()
 
