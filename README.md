@@ -72,6 +72,10 @@ ls /dev/tty.*
   - `expedited` / `fast` -> `FAST`,
   - `standard` -> `STANDARD`,
   - `attestation` / `step_up` / `stepup` -> `STEP_UP`;
+- `version`: optional Aliro protocol version preference (`AUTH0` tag `0x5C`) as either a single code or ordered priority list:
+  - single code examples: `"1.0"`, `"0100"`, `"0x0100"`, `256`;
+  - list example: `["0100", "0009"]`;
+  - omitted / `"default"` / `null` / `[]`: default behavior, prefer `1.0` (`0100`) if supported by the endpoint, otherwise use the highest endpoint-advertised version.
 - `authentication_policy`: user authentication policy string; supported values:
   - `user_device_setting` / `user` / `original` / `express` -> `USER_DEVICE_SETTING` (0x01),
   - `secure` -> `USER_DEVICE_SETTING_SECURE_ACTION` (0x02),

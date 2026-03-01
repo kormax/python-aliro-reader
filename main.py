@@ -85,6 +85,73 @@ def resolve_auth0_command_vendor_extension(value) -> bytes | None:
     raise ValueError("aliro.auth0_command_vendor_extension must be null, hex string, or base64 string")
 
 
+def _parse_dotted_protocol_version(value: str, value_path: str) -> bytes:
+    version_parts = value.split(".")
+    if len(version_parts) != 2:
+        raise ValueError(f"{value_path} dotted version must have format '<major>.<minor>' (for example 1.0)")
+    major_text, minor_text = version_parts
+    if not major_text.isdigit() or not minor_text.isdigit():
+        raise ValueError(f"{value_path} dotted version must contain decimal numbers only")
+    major = int(major_text)
+    minor = int(minor_text)
+    if not (0 <= major <= 0xFF and 0 <= minor <= 0xFF):
+        raise ValueError(f"{value_path} dotted version octets must be between 0 and 255")
+    return bytes([major, minor])
+
+
+def _parse_hex_protocol_version(value: str, value_path: str) -> bytes:
+    hex_candidate = value[2:] if value.lower().startswith("0x") else value
+    hex_candidate = "".join(hex_candidate.split())
+    try:
+        version = bytes.fromhex(hex_candidate)
+    except ValueError as exc:
+        raise ValueError(f"{value_path} must be a version code like '1.0', '0100', or '0x0100'") from exc
+    if len(version) != 2:
+        raise ValueError(f"{value_path} must resolve to exactly 2 bytes, got {len(version)}")
+    return version
+
+
+def _parse_protocol_version_code(value, value_path: str) -> bytes:
+    if isinstance(value, int):
+        if value < 0 or value > 0xFFFF:
+            raise ValueError(f"{value_path} must be between 0 and 65535 when provided as integer")
+        return value.to_bytes(2, "big")
+
+    if not isinstance(value, str):
+        raise ValueError(f"{value_path} must be a string version code or integer")
+
+    normalized = value.strip()
+    if normalized == "":
+        raise ValueError(f"{value_path} must not be empty")
+
+    if "." in normalized:
+        return _parse_dotted_protocol_version(normalized, value_path)
+    return _parse_hex_protocol_version(normalized, value_path)
+
+
+def resolve_preferred_protocol_versions(value) -> list[bytes]:
+    if value is None:
+        logging.info("Aliro protocol version preference is empty (default selection behavior)")
+        return []
+
+    if value == "default":
+        logging.info("Aliro protocol version preference set to 'default' (default selection behavior)")
+        return []
+
+    raw_values = value if isinstance(value, list) else [value]
+    preferred_versions = []
+    for index, raw_value in enumerate(raw_values):
+        parsed = _parse_protocol_version_code(raw_value, f"aliro.version[{index}]")
+        if parsed not in preferred_versions:
+            preferred_versions.append(parsed)
+
+    if preferred_versions:
+        logging.info(f"Configured Aliro protocol version priority: {[version.hex() for version in preferred_versions]}")
+    else:
+        logging.info("Configured Aliro protocol version priority is empty (default selection behavior)")
+    return preferred_versions
+
+
 def _normalize_step_up_data_element_identifiers(value, value_path: str) -> list[str]:
     if value is None:
         scopes = [DEFAULT_STEP_UP_DATA_ELEMENT]
@@ -199,6 +266,7 @@ def read_aliro_once(  # noqa: C901
     reader_certificate: bytes | None,
     auth0_command_vendor_extension: bytes | None,
     step_up_scopes: dict[str, bool],
+    preferred_versions: list[bytes],
     throttle_polling: float,
     should_run,
 ):
@@ -240,7 +308,7 @@ def read_aliro_once(  # noqa: C901
         result_flow, endpoint = read_aliro(
             tag,
             endpoints=repository.get_all_endpoints(),
-            preferred_versions=[b"\x00\x09"],  # b"\x01\x00",
+            preferred_versions=preferred_versions,
             flow=flow,
             authentication_policy=authentication_policy,
             reader_certificate=reader_certificate,
@@ -281,6 +349,7 @@ def run_aliro(
     reader_certificate: bytes | None,
     auth0_command_vendor_extension: bytes | None,
     step_up_scopes: dict[str, bool],
+    preferred_versions: list[bytes],
     throttle_polling: float,
     should_run,
 ):
@@ -303,6 +372,7 @@ def run_aliro(
             reader_certificate=reader_certificate,
             auth0_command_vendor_extension=auth0_command_vendor_extension,
             step_up_scopes=step_up_scopes,
+            preferred_versions=preferred_versions,
             throttle_polling=throttle_polling,
             should_run=should_run,
         )
@@ -333,6 +403,7 @@ def main():
         config["aliro"].get("auth0_command_vendor_extension")
     )
     step_up_scopes = resolve_step_up_scopes(config["aliro"].get("step_up_scopes"))
+    preferred_versions = resolve_preferred_protocol_versions(config["aliro"].get("version"))
     throttle_polling = float(config["nfc"].get("throttle_polling") or 0.15)
 
     running = True
@@ -358,6 +429,7 @@ def main():
             reader_certificate=reader_certificate,
             auth0_command_vendor_extension=auth0_command_vendor_extension,
             step_up_scopes=step_up_scopes,
+            preferred_versions=preferred_versions,
             throttle_polling=throttle_polling,
             should_run=should_run,
         )

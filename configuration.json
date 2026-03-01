@@ -10,6 +10,7 @@
     "aliro": {
         "persist": "persist.json",
         "flow": "fast",
+        "version": "default",
         "authentication_policy": "user_device_setting",
         "step_up_scopes": {
             "matter1": "keep"

@@ -125,6 +125,47 @@ def resolve_max_command_data_size_from_select_fci(fci_proprietary_template: BerT
     return max_command_data_size
 
 
+def resolve_protocol_version(
+    device_protocol_versions: List[bytes],
+    preferred_versions: Collection[bytes] | None = None,
+) -> bytes:
+    if not device_protocol_versions:
+        raise ProtocolError("Supported version list must not be empty")
+
+    configured_preferred_versions = list(preferred_versions or [])
+    using_default_preference = len(configured_preferred_versions) == 0
+    preferred_version_candidates = configured_preferred_versions if not using_default_preference else [b"\x01\x00"]
+
+    unique_preferred_versions: list[bytes] = []
+    for index, preferred_version in enumerate(preferred_version_candidates):
+        preferred_version_bytes = bytes(preferred_version)
+        if len(preferred_version_bytes) != 2:
+            raise ProtocolError(
+                "Invalid preferred version length at index"
+                f" {index}: expected 2 bytes, got {len(preferred_version_bytes)}"
+            )
+        if preferred_version_bytes not in unique_preferred_versions:
+            unique_preferred_versions.append(preferred_version_bytes)
+
+    for preferred_version in unique_preferred_versions:
+        if preferred_version in device_protocol_versions:
+            if using_default_preference:
+                logging.info("No version preference configured; selecting Aliro protocol version 1.0 (0100)")
+            else:
+                logging.info(f"Choosing configured preferred version {preferred_version.hex()}")
+            return preferred_version
+
+    protocol_version = device_protocol_versions[0]
+    if using_default_preference:
+        logging.info(
+            "No version preference configured; protocol version 1.0 (0100) unavailable. "
+            f"Defaulting to highest available version {protocol_version.hex()}"
+        )
+    else:
+        logging.info(f"Configured preferred versions unavailable. Using highest available {protocol_version.hex()}")
+    return protocol_version
+
+
 def transceive_with_chaining(  # noqa: C901
     tag: ISO7816Tag,
     command: ISO7816Command,
@@ -1045,18 +1086,13 @@ def read_aliro(
     if versions_tag is None:
         raise ProtocolError("Response does not contain supported version list at tag 0x5C")
 
+    if len(versions_tag.value) == 0:
+        raise ProtocolError("Supported version list at tag 0x5C must not be empty")
+    if len(versions_tag.value) % 2 != 0:
+        raise ProtocolError(f"Malformed supported version list length at tag 0x5C: {len(versions_tag.value)}")
+
     device_protocol_versions = list(chunked(versions_tag.value, 2))
-    preferred_versions = preferred_versions or []
-    for preferred_version in preferred_versions:
-        if preferred_version in device_protocol_versions:
-            protocol_version = preferred_version
-            logging.info(f"Choosing preferred version {protocol_version.hex()}")
-            break
-    else:
-        protocol_version = device_protocol_versions[0]
-        logging.info(f"Defaulting to the newest available version {protocol_version.hex()}")
-    if protocol_version not in (b"\x01\x00", b"\x00\x09"):
-        raise ProtocolError("Unknown version code")
+    protocol_version = resolve_protocol_version(device_protocol_versions, preferred_versions=preferred_versions)
 
     reader_private_key = ec.derive_private_key(int.from_bytes(reader_private_key, "big"), ec.SECP256R1())
 
