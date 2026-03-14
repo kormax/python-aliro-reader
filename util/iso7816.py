@@ -43,7 +43,8 @@ class ISO7816Command(Packable):
         p1=0x00,
         p2=0x00,
         data=None,
-        ne=0,
+        # None resolves to max amount of response requested for selected format
+        ne=None,
         extended: bool | None = None,
     ):
         super().__init__()
@@ -181,7 +182,7 @@ class ISO7816Command(Packable):
     @property
     def le(self) -> bytes:
         if self.ne == 0:
-            return b"\x00"
+            return b""
         limit = 65536 if self.extended else 256
         wire = 0 if self.ne == limit else self.ne
         if self.extended:
@@ -189,18 +190,16 @@ class ISO7816Command(Packable):
         return bytes([wire])
 
     def to_bytes(self) -> bytes:
-        nc = self.nc
-        le = self.le
         if self.extended:
-            if nc > 0:
-                return bytes([self.cla, self.ins, self.p1, self.p2, 0x00, *self.lc, *self.data, *le])
-            if le:
-                return bytes([self.cla, self.ins, self.p1, self.p2, 0x00, *le])
+            if self.nc > 0:
+                return bytes([self.cla, self.ins, self.p1, self.p2, 0x00, *self.lc, *self.data, *self.le])
+            if self.le:
+                return bytes([self.cla, self.ins, self.p1, self.p2, 0x00, *self.le])
             return bytes([self.cla, self.ins, self.p1, self.p2])
 
-        if nc > 0:
-            return bytes([self.cla, self.ins, self.p1, self.p2, *self.lc, *self.data, *le])
-        return bytes([self.cla, self.ins, self.p1, self.p2, *le])
+        if self.nc > 0:
+            return bytes([self.cla, self.ins, self.p1, self.p2, *self.lc, *self.data, *self.le])
+        return bytes([self.cla, self.ins, self.p1, self.p2, *self.le])
 
     def __repr__(self):
         return (
