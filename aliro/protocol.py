@@ -65,6 +65,8 @@ APDU_COMMAND_CHAINING_MAX_CHUNK = 0xFF
 APDU_DEFAULT_MAX_COMMAND_DATA = 255
 APDU_DEFAULT_MAX_RESPONSE_DATA = 256
 APDU_MAX_PRE_CHAINING_PAYLOAD = 2000
+# Android HCE is limited up to 265 bytes
+APDU_DEFAULT_MAX_LENGTH = 265
 
 
 class AliroTransactionFlags(IntEnum):
@@ -213,10 +215,7 @@ def transceive_with_chaining(  # noqa: C901
         logging.info(f"{label} COMMAND{chunk_suffix} {chunk_command}")
         response = tag.transceive(chunk_command)
         logging.info(f"{label} RESPONSE{chunk_suffix} {response}")
-        if len(response.data) > max_response_apdu_size:
-            raise ProtocolError(
-                f"{label} response APDU data length {len(response.data)} exceeds device max {max_response_apdu_size}"
-            )
+
         last_command = chunk_command
         if chunk_number != total_chunks and response.sw != (0x90, 0x00):
             raise ProtocolError(f"{label} INVALID STATUS DURING COMMAND CHAIN {response.sw}")
@@ -785,6 +784,7 @@ def exchange_step_up_documents(  # noqa: C901
         p1=0x00,
         p2=0x00,
         data=BerTLV(0x53, session_data),
+        extended=max_command_data_size > APDU_DEFAULT_MAX_LENGTH,
     )
     response = transceive_with_chaining(tag, command, label="ENVELOPE", max_chunk_size=max_command_data_size)
     if response.sw1 != 0x90:
