@@ -181,7 +181,7 @@ class ISO7816Command(Packable):
     @property
     def le(self) -> bytes:
         if self.ne == 0:
-            return b""
+            return b"\x00"
         limit = 65536 if self.extended else 256
         wire = 0 if self.ne == limit else self.ne
         if self.extended:
